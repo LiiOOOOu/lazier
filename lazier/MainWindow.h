@@ -67,6 +67,7 @@ private:
     struct ReadingBookmark {
         int kind = 0;
         QString target;
+        QString title;
         int position = 0;
     };
 

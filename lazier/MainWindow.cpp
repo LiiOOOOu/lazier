@@ -6,26 +6,32 @@
 #include <QtCore/QEvent>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
+#include <QtCore/QSettings>
 #include <QtCore/QTextCodec>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
 #include <QtGui/QColor>
 #include <QtGui/QCursor>
+#include <QtGui/QFontMetrics>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QScreen>
 #include <QtGui/QIcon>
 #include <QtGui/QPixmap>
+#include <QtGui/QMouseEvent>
 #include <QtGui/QShowEvent>
 #include <QtGui/QWheelEvent>
 #include <QtWebEngineWidgets/QWebEngineHistory>
+#include <QtWebEngineWidgets/QWebEnginePage>
 #include <QtWebEngineWidgets/QWebEngineView>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSystemTrayIcon>
+#include <QtWidgets/QToolTip>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 
@@ -45,6 +51,27 @@ QString pageHtml(const QString &body)
         "font-family:'Microsoft YaHei',sans-serif;font-size:16px;line-height:1.7;"
         "white-space:pre-wrap;word-wrap:break-word;}</style></head><body>%1</body></html>")
         .arg(body.toHtmlEscaped());
+}
+
+QString localTextHtml(const QString &text)
+{
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    QString body;
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines.at(i);
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
+        body += QStringLiteral("<div id=\"ln-%1\">%2</div>")
+                    .arg(i + 1)
+                    .arg(line.isEmpty() ? QStringLiteral("&nbsp;") : line.toHtmlEscaped());
+    }
+    return QStringLiteral(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        "<style>body{margin:16px;background:#ffffff;color:#222222;"
+        "font-family:'Microsoft YaHei',sans-serif;font-size:16px;line-height:1.7;}"
+        "#reader div{white-space:pre-wrap;word-wrap:break-word;min-height:1.7em;}</style>"
+        "</head><body><div id=\"reader\">%1</div></body></html>")
+        .arg(body);
 }
 
 QString decodeTextFile(const QByteArray &bytes)
@@ -68,15 +95,17 @@ HHOOK g_mouseHook = nullptr;
 
 LRESULT CALLBACK keyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && g_mainWindow
-        && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+    if (nCode == HC_ACTION && g_mainWindow) {
         const KBDLLHOOKSTRUCT *info = reinterpret_cast<const KBDLLHOOKSTRUCT *>(lParam);
-        if (info->vkCode == VK_TAB) {
+        const bool down = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
+        const bool up = wParam == WM_KEYUP || wParam == WM_SYSKEYUP;
+        if (down && info->vkCode == VK_TAB) {
             const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
             if (ctrl || alt)
                 QMetaObject::invokeMethod(g_mainWindow, "minimizeForSwitcher", Qt::QueuedConnection);
-        } else if ((GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        } else if (down && (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+                   && !g_mainWindow->revealHotkeyUsesControl()
                    && g_mainWindow->shouldHandleWebZoomHotkey()) {
             if (info->vkCode == VK_OEM_PLUS || info->vkCode == VK_ADD) {
                 QMetaObject::invokeMethod(g_mainWindow, "zoomWebByDelta",
@@ -93,19 +122,29 @@ LRESULT CALLBACK keyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
                 return 1;
             }
         }
+        Q_UNUSED(up)
     }
     return CallNextHookEx(g_keyboardHook, nCode, wParam, lParam);
 }
 
 LRESULT CALLBACK mouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && g_mainWindow && wParam == WM_MOUSEWHEEL) {
-        const MSLLHOOKSTRUCT *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && g_mainWindow->isCursorOverWeb()) {
+    if (nCode == HC_ACTION && g_mainWindow) {
+        const bool reveal = g_mainWindow->prepareRevealMouseInput();
+        if (wParam == WM_MOUSEWHEEL && g_mainWindow->isCursorOverWeb()) {
+            const MSLLHOOKSTRUCT *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
             const short delta = GET_WHEEL_DELTA_WPARAM(info->mouseData);
-            QMetaObject::invokeMethod(g_mainWindow, "zoomWebByDelta",
-                                      Qt::QueuedConnection, Q_ARG(int, int(delta)));
-            return 1;
+            const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl && !g_mainWindow->revealHotkeyUsesControl()) {
+                QMetaObject::invokeMethod(g_mainWindow, "zoomWebByDelta",
+                                          Qt::QueuedConnection, Q_ARG(int, int(delta)));
+                return 1;
+            }
+            if (reveal) {
+                QMetaObject::invokeMethod(g_mainWindow, "scrollWebByDelta",
+                                          Qt::QueuedConnection, Q_ARG(int, int(delta)));
+                return 1;
+            }
         }
     }
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
@@ -140,6 +179,7 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowIcon(lazierAppIcon());
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowMinMaxButtonsHint);
     resize(400, 500);
+    loadBookmarks();
 
     m_frame = new QWidget(this);
     m_frame->setObjectName(QStringLiteral("windowFrame"));
@@ -160,7 +200,9 @@ MainWindow::MainWindow(QWidget *parent)
         "QPushButton#navButton:hover { background: #E5E5E5; }"
         "QPushButton#navButton:pressed { background: #D5D5D5; }"
         "QPushButton#navButton:disabled { color: #BBBBBB; }"
-        "QComboBox#sourceCombo { background: #FFFFFF; border: 1px solid #D0D0D0; padding: 1px 6px 1px 4px; }"));
+        "QComboBox#sourceCombo { background: #FFFFFF; border: 1px solid #D0D0D0; padding: 0 2px; min-height: 24px; }"
+        "QLineEdit { min-height: 24px; }"
+        "QPushButton#goButton, QPushButton#bookmarkButton { padding: 0 4px; min-height: 24px; }"));
     m_backButton = new QPushButton(QStringLiteral("<"), m_addressBar);
     m_backButton->setObjectName(QStringLiteral("navButton"));
     m_backButton->setFixedSize(26, 26);
@@ -171,33 +213,46 @@ MainWindow::MainWindow(QWidget *parent)
     m_forwardButton->setFixedSize(26, 26);
     m_forwardButton->setToolTip(QStringLiteral("前进"));
     m_forwardButton->setEnabled(false);
-    QComboBox *sourceCombo = new QComboBox(m_addressBar);
-    sourceCombo->setObjectName(QStringLiteral("sourceCombo"));
-    sourceCombo->addItem(QStringLiteral("网络"));
-    sourceCombo->addItem(QStringLiteral("本地"));
-    sourceCombo->setFixedWidth(72);
-    sourceCombo->setToolTip(QStringLiteral("网络打开网址，本地打开 txt 文件"));
-    QLineEdit *urlEdit = new QLineEdit(m_addressBar);
-    urlEdit->setPlaceholderText(QStringLiteral("输入网址后回车"));
+    m_sourceCombo = new QComboBox(m_addressBar);
+    m_sourceCombo->setObjectName(QStringLiteral("sourceCombo"));
+    m_sourceCombo->addItem(QStringLiteral("网络"));
+    m_sourceCombo->addItem(QStringLiteral("本地"));
+    m_sourceCombo->setFixedSize(52, 26);
+    m_sourceCombo->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_sourceCombo->setToolTip(QStringLiteral("网络打开网址，本地打开 txt 文件"));
+    m_urlEdit = new QLineEdit(m_addressBar);
+    m_urlEdit->setPlaceholderText(QStringLiteral("输入网址后回车"));
+    m_urlEdit->setFixedHeight(26);
+    m_urlEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     QPushButton *goButton = new QPushButton(QStringLiteral("前往"), m_addressBar);
+    goButton->setObjectName(QStringLiteral("goButton"));
+    goButton->setFixedSize(40, 26);
+    QPushButton *bookmarkButton = new QPushButton(QStringLiteral("书签"), m_addressBar);
+    bookmarkButton->setObjectName(QStringLiteral("bookmarkButton"));
+    bookmarkButton->setFixedSize(40, 26);
+    bookmarkButton->setToolTip(QStringLiteral("点开后，点某一条右侧的「记下」保存当前位置"));
     QHBoxLayout *addressLayout = new QHBoxLayout(m_addressBar);
     addressLayout->setContentsMargins(6, 4, 8, 4);
     addressLayout->setSpacing(2);
     addressLayout->addWidget(m_backButton);
     addressLayout->addWidget(m_forwardButton);
-    addressLayout->addWidget(sourceCombo);
-    addressLayout->addWidget(urlEdit, 1);
+    addressLayout->addWidget(m_sourceCombo);
+    addressLayout->addWidget(m_urlEdit, 1);
     addressLayout->addWidget(goButton);
+    addressLayout->addWidget(bookmarkButton);
 
     m_web = new QWebEngineView(m_frame);
     m_web->setUrl(QUrl(QStringLiteral("about:blank")));
 
-    const auto navigate = [this, urlEdit, sourceCombo]() {
-        if (sourceCombo->currentIndex() == 1) {
-            openLocalText(urlEdit->text());
+    const auto navigate = [this]() {
+        m_pendingLocalLine = 0;
+        m_pendingWebScroll = -1;
+        if (m_sourceCombo->currentIndex() == 1) {
+            openLocalText(m_urlEdit->text());
             return;
         }
-        QString text = urlEdit->text().trimmed();
+        m_currentLocalPath.clear();
+        QString text = m_urlEdit->text().trimmed();
         if (text.isEmpty()) {
             m_web->setUrl(QUrl(QStringLiteral("about:blank")));
             return;
@@ -206,22 +261,48 @@ MainWindow::MainWindow(QWidget *parent)
             text.prepend(QStringLiteral("https://"));
         m_web->setUrl(QUrl::fromUserInput(text));
     };
-    connect(urlEdit, &QLineEdit::returnPressed, this, navigate);
+    connect(m_urlEdit, &QLineEdit::returnPressed, this, navigate);
     connect(goButton, &QPushButton::clicked, this, navigate);
-    connect(sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [urlEdit](int index) {
-        urlEdit->setPlaceholderText(index == 1
+    connect(bookmarkButton, &QPushButton::clicked, this, &MainWindow::showBookmarkPopup);
+    connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        m_urlEdit->setPlaceholderText(index == 1
             ? QStringLiteral("输入本地 txt 路径后回车")
             : QStringLiteral("输入网址后回车"));
     });
     connect(m_backButton, &QPushButton::clicked, m_web, &QWebEngineView::back);
     connect(m_forwardButton, &QPushButton::clicked, m_web, &QWebEngineView::forward);
-    connect(m_web, &QWebEngineView::urlChanged, this, [this, urlEdit, sourceCombo](const QUrl &url) {
-        if (sourceCombo->currentIndex() == 0)
-            urlEdit->setText(url.toString());
+    connect(m_web, &QWebEngineView::urlChanged, this, [this](const QUrl &url) {
+        if (m_sourceCombo->currentIndex() == 0)
+            m_urlEdit->setText(url.toString());
         updateHistoryButtons();
     });
-    connect(m_web, &QWebEngineView::loadFinished, this, [this](bool) {
+    connect(m_web, &QWebEngineView::loadFinished, this, [this](bool ok) {
         updateHistoryButtons();
+        if (!ok || !m_web->page())
+            return;
+        if (m_pendingLocalLine > 1) {
+            const int line = m_pendingLocalLine;
+            const QString probe = QStringLiteral(
+                "(function(){var el=document.getElementById('ln-%1');"
+                "if(el){el.scrollIntoView({block:'start'});return 1;}"
+                "if(document.getElementById('ln-1'))return 0;return -1;})()").arg(line);
+            m_web->page()->runJavaScript(probe, [this, line](const QVariant &result) {
+                const int state = result.toInt();
+                if (state < 0 || m_pendingLocalLine != line)
+                    return;
+                m_pendingLocalLine = 0;
+            });
+        }
+        if (m_pendingWebScroll >= 0) {
+            const int y = m_pendingWebScroll;
+            m_pendingWebScroll = -1;
+            const QString js = QStringLiteral("window.scrollTo(0,%1);").arg(y);
+            m_web->page()->runJavaScript(js);
+            QTimer::singleShot(500, this, [this, js]() {
+                if (m_web && m_web->page())
+                    m_web->page()->runJavaScript(js);
+            });
+        }
     });
 
     QVBoxLayout *layout = new QVBoxLayout(m_frame);
@@ -298,9 +379,25 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         QWidget *widget = qobject_cast<QWidget *>(watched);
         if (widget && (widget == m_web || m_web->isAncestorOf(widget))) {
             QWheelEvent *wheel = static_cast<QWheelEvent *>(event);
-            if (wheel->modifiers() & Qt::ControlModifier) {
+            if ((wheel->modifiers() & Qt::ControlModifier) && !revealHotkeyUsesControl()) {
                 zoomWebByDelta(wheel->angleDelta().y());
                 return true;
+            }
+        }
+    }
+    if ((event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease)
+        && revealModifierDown() && m_web) {
+        QWidget *widget = qobject_cast<QWidget *>(watched);
+        QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
+        if (widget && mouse->button() == Qt::LeftButton
+            && (widget == m_web || m_web->isAncestorOf(widget))) {
+            if (event->type() == QEvent::MouseButtonPress) {
+                m_revealPressing = true;
+                m_revealPressPos = mouse->globalPos();
+            } else if (m_revealPressing) {
+                m_revealPressing = false;
+                if ((mouse->globalPos() - m_revealPressPos).manhattanLength() <= 6)
+                    clickWebAt(m_web->mapFromGlobal(mouse->globalPos()));
             }
         }
     }
@@ -373,7 +470,9 @@ void MainWindow::setDisplayOpacity(int percent)
 
 void MainWindow::updateGhostVisual()
 {
-    const bool inside = isCursorInside();
+    const bool overBookmark = m_bookmarkPopup && m_bookmarkPopup->isVisible()
+        && m_bookmarkPopup->geometry().contains(QCursor::pos());
+    const bool inside = isCursorInside() || overBookmark;
     const bool hotkeyMode = m_ghostEnhanced && (m_ghostModifiers != 0 || m_ghostVirtualKey != 0);
     if (m_ghostMode && !m_ghostArmed && isVisible()) {
         if (!m_ghostWatchingEnter) {
@@ -402,6 +501,8 @@ void MainWindow::updateGhostVisual()
         }
     }
     if (!show) {
+        if (m_bookmarkPopup && m_bookmarkPopup->isVisible())
+            m_bookmarkPopup->hide();
         setWindowOpacity(kGhostOpacity);
         return;
     }
@@ -492,6 +593,54 @@ void MainWindow::zoomWebByDelta(int delta)
     m_web->setZoomFactor(qBound(0.25, factor, 5.0));
 }
 
+void MainWindow::scrollWebByDelta(int delta)
+{
+    if (!m_web || !m_web->page() || delta == 0)
+        return;
+    m_web->page()->runJavaScript(QStringLiteral("window.scrollBy(0,%1);").arg(-delta));
+}
+
+bool MainWindow::revealModifierDown() const
+{
+    if (!m_ghostMode || !m_ghostEnhanced)
+        return false;
+#ifdef Q_OS_WIN
+    return ghostHotkeyHeld(m_ghostModifiers, m_ghostVirtualKey);
+#else
+    return false;
+#endif
+}
+
+bool MainWindow::revealHotkeyUsesControl() const
+{
+    return m_ghostMode && m_ghostEnhanced && (m_ghostModifiers & Qt::ControlModifier);
+}
+
+bool MainWindow::prepareRevealMouseInput()
+{
+    if (!revealModifierDown() || !isVisible() || isMinimized())
+        return false;
+    if (isCursorInside())
+        return true;
+    return m_bookmarkPopup && m_bookmarkPopup->isVisible()
+        && m_bookmarkPopup->geometry().contains(QCursor::pos());
+}
+
+void MainWindow::clickWebAt(const QPoint &pos)
+{
+    if (!m_web || !m_web->page())
+        return;
+    const qreal zoom = m_web->zoomFactor() > 0 ? m_web->zoomFactor() : 1.0;
+    const int x = qRound(pos.x() / zoom);
+    const int y = qRound(pos.y() / zoom);
+    m_web->page()->runJavaScript(QStringLiteral(
+        "(function(){var x=%1,y=%2,el=document.elementFromPoint(x,y);if(!el)return;"
+        "var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
+        "el.dispatchEvent(new MouseEvent('mousedown',o));"
+        "el.dispatchEvent(new MouseEvent('mouseup',o));"
+        "el.dispatchEvent(new MouseEvent('click',o));})()").arg(x).arg(y));
+}
+
 void MainWindow::resetWebZoom()
 {
     if (m_web)
@@ -513,35 +662,250 @@ void MainWindow::updateHistoryButtons()
         m_forwardButton->setEnabled(history && history->canGoForward());
 }
 
-void MainWindow::openLocalText(const QString &pathText)
+void MainWindow::openLocalText(const QString &pathText, int line)
 {
+    m_pendingWebScroll = -1;
     QString path = pathText.trimmed();
     if (path.size() >= 2 && path.startsWith(QLatin1Char('"')) && path.endsWith(QLatin1Char('"')))
         path = path.mid(1, path.size() - 2).trimmed();
     if (path.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive))
         path = QUrl(path).toLocalFile();
     if (path.isEmpty()) {
+        m_currentLocalPath.clear();
+        m_pendingLocalLine = 0;
         m_web->setHtml(pageHtml(QStringLiteral("请输入 txt 文件路径")));
         return;
     }
 
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile()) {
+        m_currentLocalPath.clear();
+        m_pendingLocalLine = 0;
         m_web->setHtml(pageHtml(QStringLiteral("找不到文件：%1").arg(path)));
         return;
     }
     if (info.suffix().compare(QLatin1String("txt"), Qt::CaseInsensitive) != 0) {
+        m_currentLocalPath.clear();
+        m_pendingLocalLine = 0;
         m_web->setHtml(pageHtml(QStringLiteral("本地模式只打开 txt 文件")));
         return;
     }
 
     QFile file(info.absoluteFilePath());
     if (!file.open(QIODevice::ReadOnly)) {
+        m_currentLocalPath.clear();
+        m_pendingLocalLine = 0;
         m_web->setHtml(pageHtml(QStringLiteral("无法打开文件：%1").arg(info.absoluteFilePath())));
         return;
     }
-    m_web->setHtml(pageHtml(decodeTextFile(file.readAll())),
+    m_currentLocalPath = info.absoluteFilePath();
+    m_pendingLocalLine = line;
+    m_web->setHtml(localTextHtml(decodeTextFile(file.readAll())),
                    QUrl::fromLocalFile(info.absolutePath() + QLatin1Char('/')));
+}
+
+void MainWindow::loadBookmarks()
+{
+    QSettings settings;
+    for (int i = 0; i < 10; ++i) {
+        const QString key = QStringLiteral("bookmarks/%1/").arg(i);
+        const int kind = settings.value(key + QStringLiteral("kind"), 0).toInt();
+        m_bookmarks[i].kind = (kind == 1 || kind == 2) ? kind : 0;
+        m_bookmarks[i].target = settings.value(key + QStringLiteral("target")).toString();
+        m_bookmarks[i].title = settings.value(key + QStringLiteral("title")).toString();
+        m_bookmarks[i].position = settings.value(key + QStringLiteral("position"), 0).toInt();
+        if (m_bookmarks[i].target.isEmpty())
+            m_bookmarks[i].kind = 0;
+    }
+}
+
+void MainWindow::saveBookmarks()
+{
+    QSettings settings;
+    for (int i = 0; i < 10; ++i) {
+        const QString key = QStringLiteral("bookmarks/%1/").arg(i);
+        settings.setValue(key + QStringLiteral("kind"), m_bookmarks[i].kind);
+        settings.setValue(key + QStringLiteral("target"), m_bookmarks[i].target);
+        settings.setValue(key + QStringLiteral("title"), m_bookmarks[i].title);
+        settings.setValue(key + QStringLiteral("position"), m_bookmarks[i].position);
+    }
+}
+
+QString MainWindow::bookmarkLabel(int index) const
+{
+    const ReadingBookmark &mark = m_bookmarks[index];
+    if (mark.kind == 2) {
+        return QStringLiteral("%1  本地  %2  第%3行")
+            .arg(index + 1)
+            .arg(QFileInfo(mark.target).fileName())
+            .arg(qMax(1, mark.position));
+    }
+    if (mark.kind == 1) {
+        if (!mark.title.isEmpty())
+            return QStringLiteral("%1  %2").arg(index + 1).arg(mark.title);
+        const QUrl url(mark.target);
+        QString name = url.host();
+        if (name.isEmpty())
+            name = mark.target;
+        return QStringLiteral("%1  %2").arg(index + 1).arg(name);
+    }
+    return QStringLiteral("%1  空").arg(index + 1);
+}
+
+void MainWindow::refreshBookmarkPopup()
+{
+    for (int i = 0; i < 10; ++i) {
+        if (!m_bookmarkButtons[i])
+            continue;
+        const QString full = bookmarkLabel(i);
+        const int textWidth = qMax(80, m_bookmarkPopup->width() - 70);
+        const QString shown = QFontMetrics(m_bookmarkButtons[i]->font()).elidedText(full, Qt::ElideRight, textWidth);
+        m_bookmarkButtons[i]->setText(shown);
+        m_bookmarkButtons[i]->setEnabled(m_bookmarks[i].kind != 0);
+        QString tip = m_bookmarks[i].title;
+        if (!tip.isEmpty())
+            tip += QLatin1Char('\n');
+        tip += m_bookmarks[i].target;
+        if (m_bookmarks[i].kind == 1)
+            tip += QStringLiteral("\n滚动位置 %1").arg(qMax(0, m_bookmarks[i].position));
+        else if (m_bookmarks[i].kind == 2)
+            tip += QStringLiteral("\n第 %1 行").arg(qMax(1, m_bookmarks[i].position));
+        m_bookmarkButtons[i]->setToolTip(tip);
+    }
+}
+
+void MainWindow::createBookmarkPopup()
+{
+    m_bookmarkPopup = new QWidget(window(), Qt::Popup | Qt::FramelessWindowHint);
+    m_bookmarkPopup->setFixedSize(460, 342);
+    m_bookmarkPopup->setStyleSheet(QStringLiteral(
+        "QWidget { background: #FFFFFF; border: 1px solid #D0D0D0; }"
+        "QLabel { border: none; color: #666666; }"
+        "QPushButton { border: none; color: #222222; background: transparent; text-align: left; padding: 2px 8px; }"
+        "QPushButton:disabled { color: #AAAAAA; }"
+        "QPushButton#markSave { background: #F3F3F3; text-align: center; padding: 0 4px; min-height: 26px; }"));
+
+    QVBoxLayout *layout = new QVBoxLayout(m_bookmarkPopup);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(2);
+    QLabel *hint = new QLabel(QStringLiteral("点右侧「记下」保存当前页，点左侧打开"), m_bookmarkPopup);
+    layout->addWidget(hint);
+    for (int i = 0; i < 10; ++i) {
+        QWidget *row = new QWidget(m_bookmarkPopup);
+        QHBoxLayout *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(4);
+        QPushButton *openButton = new QPushButton(row);
+        openButton->setFixedHeight(26);
+        m_bookmarkButtons[i] = openButton;
+        QPushButton *saveButton = new QPushButton(QStringLiteral("记下"), row);
+        saveButton->setObjectName(QStringLiteral("markSave"));
+        saveButton->setFixedSize(44, 26);
+        saveButton->setToolTip(QStringLiteral("把当前阅读位置记到这一条"));
+        rowLayout->addWidget(openButton, 1);
+        rowLayout->addWidget(saveButton);
+        layout->addWidget(row);
+        connect(openButton, &QPushButton::clicked, this, [this, i]() { openBookmark(i); });
+        connect(saveButton, &QPushButton::clicked, this, [this, i]() { saveBookmark(i); });
+    }
+}
+
+void MainWindow::showBookmarkPopup()
+{
+    if (!m_bookmarkPopup)
+        createBookmarkPopup();
+    refreshBookmarkPopup();
+    QPoint pos = m_addressBar->mapToGlobal(QPoint(m_addressBar->width() - m_bookmarkPopup->width(), m_addressBar->height()));
+    if (pos.x() < 0)
+        pos.setX(0);
+    m_bookmarkPopup->move(pos);
+    m_bookmarkPopup->show();
+}
+
+void MainWindow::saveBookmark(int index)
+{
+    if (index < 0 || index >= 10 || !m_web || !m_web->page())
+        return;
+    const bool localMode = m_sourceCombo && m_sourceCombo->currentIndex() == 1;
+    if (localMode) {
+        if (m_currentLocalPath.isEmpty()) {
+            QToolTip::showText(QCursor::pos(), QStringLiteral("请先打开 txt"));
+            return;
+        }
+        const QString path = m_currentLocalPath;
+        m_web->page()->runJavaScript(QStringLiteral(
+            "(function(){var y=window.pageYOffset||0;"
+            "var nodes=document.querySelectorAll('[id^=ln-]');"
+            "if(!nodes.length)return 0;"
+            "var line=1;for(var i=0;i<nodes.length;i++){"
+            "if(nodes[i].offsetTop<=y+4)line=i+1;else break;}return line;})()"),
+            [this, index, path](const QVariant &result) {
+                const int line = qMax(1, result.toInt());
+                m_bookmarks[index].kind = 2;
+                m_bookmarks[index].target = path;
+                m_bookmarks[index].title.clear();
+                m_bookmarks[index].position = line;
+                saveBookmarks();
+                refreshBookmarkPopup();
+            });
+        return;
+    }
+
+    const QUrl url = m_web->url();
+    if (url.scheme() != QLatin1String("http") && url.scheme() != QLatin1String("https")) {
+        QToolTip::showText(QCursor::pos(), QStringLiteral("请先打开网页"));
+        return;
+    }
+    const QString target = url.toString();
+    m_web->page()->runJavaScript(QStringLiteral(
+        "(function(){"
+        "var name=(document.title||'').replace(/\\s+/g,' ').trim();"
+        "var y=window.pageYOffset||window.scrollY||0;"
+        "return String(y)+'\\n'+name;"
+        "})()"),
+        [this, index, target](const QVariant &result) {
+            const QString raw = result.toString();
+            const int split = raw.indexOf(QLatin1Char('\n'));
+            const int y = qMax(0, (split < 0 ? raw : raw.left(split)).toInt());
+            QString title = split < 0 ? QString() : raw.mid(split + 1).trimmed();
+            m_bookmarks[index].kind = 1;
+            m_bookmarks[index].target = target;
+            m_bookmarks[index].title = title;
+            m_bookmarks[index].position = y;
+            saveBookmarks();
+            refreshBookmarkPopup();
+        });
+}
+
+void MainWindow::openBookmark(int index)
+{
+    if (index < 0 || index >= 10)
+        return;
+    const ReadingBookmark mark = m_bookmarks[index];
+    if (mark.kind == 0 || mark.target.isEmpty())
+        return;
+    if (m_bookmarkPopup)
+        m_bookmarkPopup->hide();
+    if (mark.kind == 2) {
+        if (m_sourceCombo)
+            m_sourceCombo->setCurrentIndex(1);
+        if (m_urlEdit)
+            m_urlEdit->setText(mark.target);
+        openLocalText(mark.target, qMax(1, mark.position));
+        return;
+    }
+    m_currentLocalPath.clear();
+    m_pendingLocalLine = 0;
+    m_pendingWebScroll = qMax(0, mark.position);
+    if (m_sourceCombo)
+        m_sourceCombo->setCurrentIndex(0);
+    if (m_urlEdit)
+        m_urlEdit->setText(mark.target);
+    const QUrl url(mark.target);
+    if (m_web->url() == url)
+        m_web->reload();
+    else
+        m_web->setUrl(url);
 }
 
 void MainWindow::hideFromTaskbar()
@@ -562,6 +926,19 @@ void MainWindow::hideFromTaskbar()
 void MainWindow::installSwitcherHook()
 {
 #ifdef Q_OS_WIN
+    const auto releaseIfDown = [](WORD virtualKey) {
+        if ((GetAsyncKeyState(virtualKey) & 0x8000) == 0)
+            return;
+        INPUT input = {};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = virtualKey;
+        input.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &input, sizeof(INPUT));
+    };
+    releaseIfDown(VK_LMENU);
+    releaseIfDown(VK_RMENU);
+    releaseIfDown(VK_MENU);
+
     g_mainWindow = this;
     if (!g_keyboardHook)
         g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardProc, GetModuleHandleW(nullptr), 0);

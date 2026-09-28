@@ -12,6 +12,7 @@
 #include <QtCore/QUrl>
 #include <QtGui/QColor>
 #include <QtGui/QCursor>
+#include <QtGui/QFontMetrics>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QScreen>
 #include <QtGui/QIcon>
@@ -711,6 +712,7 @@ void MainWindow::loadBookmarks()
         const int kind = settings.value(key + QStringLiteral("kind"), 0).toInt();
         m_bookmarks[i].kind = (kind == 1 || kind == 2) ? kind : 0;
         m_bookmarks[i].target = settings.value(key + QStringLiteral("target")).toString();
+        m_bookmarks[i].title = settings.value(key + QStringLiteral("title")).toString();
         m_bookmarks[i].position = settings.value(key + QStringLiteral("position"), 0).toInt();
         if (m_bookmarks[i].target.isEmpty())
             m_bookmarks[i].kind = 0;
@@ -724,6 +726,7 @@ void MainWindow::saveBookmarks()
         const QString key = QStringLiteral("bookmarks/%1/").arg(i);
         settings.setValue(key + QStringLiteral("kind"), m_bookmarks[i].kind);
         settings.setValue(key + QStringLiteral("target"), m_bookmarks[i].target);
+        settings.setValue(key + QStringLiteral("title"), m_bookmarks[i].title);
         settings.setValue(key + QStringLiteral("position"), m_bookmarks[i].position);
     }
 }
@@ -738,11 +741,13 @@ QString MainWindow::bookmarkLabel(int index) const
             .arg(qMax(1, mark.position));
     }
     if (mark.kind == 1) {
+        if (!mark.title.isEmpty())
+            return QStringLiteral("%1  %2").arg(index + 1).arg(mark.title);
         const QUrl url(mark.target);
         QString name = url.host();
         if (name.isEmpty())
             name = mark.target;
-        return QStringLiteral("%1  网络  %2").arg(index + 1).arg(name);
+        return QStringLiteral("%1  %2").arg(index + 1).arg(name);
     }
     return QStringLiteral("%1  空").arg(index + 1);
 }
@@ -752,9 +757,15 @@ void MainWindow::refreshBookmarkPopup()
     for (int i = 0; i < 10; ++i) {
         if (!m_bookmarkButtons[i])
             continue;
-        m_bookmarkButtons[i]->setText(bookmarkLabel(i));
+        const QString full = bookmarkLabel(i);
+        const int textWidth = qMax(80, m_bookmarkPopup->width() - 70);
+        const QString shown = QFontMetrics(m_bookmarkButtons[i]->font()).elidedText(full, Qt::ElideRight, textWidth);
+        m_bookmarkButtons[i]->setText(shown);
         m_bookmarkButtons[i]->setEnabled(m_bookmarks[i].kind != 0);
-        QString tip = m_bookmarks[i].target;
+        QString tip = m_bookmarks[i].title;
+        if (!tip.isEmpty())
+            tip += QLatin1Char('\n');
+        tip += m_bookmarks[i].target;
         if (m_bookmarks[i].kind == 1)
             tip += QStringLiteral("\n滚动位置 %1").arg(qMax(0, m_bookmarks[i].position));
         else if (m_bookmarks[i].kind == 2)
@@ -766,7 +777,7 @@ void MainWindow::refreshBookmarkPopup()
 void MainWindow::createBookmarkPopup()
 {
     m_bookmarkPopup = new QWidget(window(), Qt::Popup | Qt::FramelessWindowHint);
-    m_bookmarkPopup->setFixedSize(340, 342);
+    m_bookmarkPopup->setFixedSize(460, 342);
     m_bookmarkPopup->setStyleSheet(QStringLiteral(
         "QWidget { background: #FFFFFF; border: 1px solid #D0D0D0; }"
         "QLabel { border: none; color: #666666; }"
@@ -832,6 +843,7 @@ void MainWindow::saveBookmark(int index)
                 const int line = qMax(1, result.toInt());
                 m_bookmarks[index].kind = 2;
                 m_bookmarks[index].target = path;
+                m_bookmarks[index].title.clear();
                 m_bookmarks[index].position = line;
                 saveBookmarks();
                 refreshBookmarkPopup();
@@ -845,11 +857,21 @@ void MainWindow::saveBookmark(int index)
         return;
     }
     const QString target = url.toString();
-    m_web->page()->runJavaScript(QStringLiteral("(window.pageYOffset||window.scrollY||0)"),
+    m_web->page()->runJavaScript(QStringLiteral(
+        "(function(){"
+        "var name=(document.title||'').replace(/\\s+/g,' ').trim();"
+        "var y=window.pageYOffset||window.scrollY||0;"
+        "return String(y)+'\\n'+name;"
+        "})()"),
         [this, index, target](const QVariant &result) {
+            const QString raw = result.toString();
+            const int split = raw.indexOf(QLatin1Char('\n'));
+            const int y = qMax(0, (split < 0 ? raw : raw.left(split)).toInt());
+            QString title = split < 0 ? QString() : raw.mid(split + 1).trimmed();
             m_bookmarks[index].kind = 1;
             m_bookmarks[index].target = target;
-            m_bookmarks[index].position = qMax(0, result.toInt());
+            m_bookmarks[index].title = title;
+            m_bookmarks[index].position = y;
             saveBookmarks();
             refreshBookmarkPopup();
         });

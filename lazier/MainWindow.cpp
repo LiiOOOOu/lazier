@@ -12,10 +12,12 @@
 #include <QtCore/QUrl>
 #include <QtGui/QColor>
 #include <QtGui/QCursor>
+#include <QtGui/QFontMetrics>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QScreen>
 #include <QtGui/QIcon>
 #include <QtGui/QPixmap>
+#include <QtGui/QMouseEvent>
 #include <QtGui/QShowEvent>
 #include <QtGui/QWheelEvent>
 #include <QtWebEngineWidgets/QWebEngineHistory>
@@ -93,15 +95,17 @@ HHOOK g_mouseHook = nullptr;
 
 LRESULT CALLBACK keyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && g_mainWindow
-        && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+    if (nCode == HC_ACTION && g_mainWindow) {
         const KBDLLHOOKSTRUCT *info = reinterpret_cast<const KBDLLHOOKSTRUCT *>(lParam);
-        if (info->vkCode == VK_TAB) {
+        const bool down = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
+        const bool up = wParam == WM_KEYUP || wParam == WM_SYSKEYUP;
+        if (down && info->vkCode == VK_TAB) {
             const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
             if (ctrl || alt)
                 QMetaObject::invokeMethod(g_mainWindow, "minimizeForSwitcher", Qt::QueuedConnection);
-        } else if ((GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        } else if (down && (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+                   && !g_mainWindow->revealHotkeyUsesControl()
                    && g_mainWindow->shouldHandleWebZoomHotkey()) {
             if (info->vkCode == VK_OEM_PLUS || info->vkCode == VK_ADD) {
                 QMetaObject::invokeMethod(g_mainWindow, "zoomWebByDelta",
@@ -118,19 +122,29 @@ LRESULT CALLBACK keyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
                 return 1;
             }
         }
+        Q_UNUSED(up)
     }
     return CallNextHookEx(g_keyboardHook, nCode, wParam, lParam);
 }
 
 LRESULT CALLBACK mouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && g_mainWindow && wParam == WM_MOUSEWHEEL) {
-        const MSLLHOOKSTRUCT *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
-        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && g_mainWindow->isCursorOverWeb()) {
+    if (nCode == HC_ACTION && g_mainWindow) {
+        const bool reveal = g_mainWindow->prepareRevealMouseInput();
+        if (wParam == WM_MOUSEWHEEL && g_mainWindow->isCursorOverWeb()) {
+            const MSLLHOOKSTRUCT *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
             const short delta = GET_WHEEL_DELTA_WPARAM(info->mouseData);
-            QMetaObject::invokeMethod(g_mainWindow, "zoomWebByDelta",
-                                      Qt::QueuedConnection, Q_ARG(int, int(delta)));
-            return 1;
+            const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl && !g_mainWindow->revealHotkeyUsesControl()) {
+                QMetaObject::invokeMethod(g_mainWindow, "zoomWebByDelta",
+                                          Qt::QueuedConnection, Q_ARG(int, int(delta)));
+                return 1;
+            }
+            if (reveal) {
+                QMetaObject::invokeMethod(g_mainWindow, "scrollWebByDelta",
+                                          Qt::QueuedConnection, Q_ARG(int, int(delta)));
+                return 1;
+            }
         }
     }
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
@@ -365,9 +379,25 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         QWidget *widget = qobject_cast<QWidget *>(watched);
         if (widget && (widget == m_web || m_web->isAncestorOf(widget))) {
             QWheelEvent *wheel = static_cast<QWheelEvent *>(event);
-            if (wheel->modifiers() & Qt::ControlModifier) {
+            if ((wheel->modifiers() & Qt::ControlModifier) && !revealHotkeyUsesControl()) {
                 zoomWebByDelta(wheel->angleDelta().y());
                 return true;
+            }
+        }
+    }
+    if ((event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease)
+        && revealModifierDown() && m_web) {
+        QWidget *widget = qobject_cast<QWidget *>(watched);
+        QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
+        if (widget && mouse->button() == Qt::LeftButton
+            && (widget == m_web || m_web->isAncestorOf(widget))) {
+            if (event->type() == QEvent::MouseButtonPress) {
+                m_revealPressing = true;
+                m_revealPressPos = mouse->globalPos();
+            } else if (m_revealPressing) {
+                m_revealPressing = false;
+                if ((mouse->globalPos() - m_revealPressPos).manhattanLength() <= 6)
+                    clickWebAt(m_web->mapFromGlobal(mouse->globalPos()));
             }
         }
     }
@@ -563,6 +593,54 @@ void MainWindow::zoomWebByDelta(int delta)
     m_web->setZoomFactor(qBound(0.25, factor, 5.0));
 }
 
+void MainWindow::scrollWebByDelta(int delta)
+{
+    if (!m_web || !m_web->page() || delta == 0)
+        return;
+    m_web->page()->runJavaScript(QStringLiteral("window.scrollBy(0,%1);").arg(-delta));
+}
+
+bool MainWindow::revealModifierDown() const
+{
+    if (!m_ghostMode || !m_ghostEnhanced)
+        return false;
+#ifdef Q_OS_WIN
+    return ghostHotkeyHeld(m_ghostModifiers, m_ghostVirtualKey);
+#else
+    return false;
+#endif
+}
+
+bool MainWindow::revealHotkeyUsesControl() const
+{
+    return m_ghostMode && m_ghostEnhanced && (m_ghostModifiers & Qt::ControlModifier);
+}
+
+bool MainWindow::prepareRevealMouseInput()
+{
+    if (!revealModifierDown() || !isVisible() || isMinimized())
+        return false;
+    if (isCursorInside())
+        return true;
+    return m_bookmarkPopup && m_bookmarkPopup->isVisible()
+        && m_bookmarkPopup->geometry().contains(QCursor::pos());
+}
+
+void MainWindow::clickWebAt(const QPoint &pos)
+{
+    if (!m_web || !m_web->page())
+        return;
+    const qreal zoom = m_web->zoomFactor() > 0 ? m_web->zoomFactor() : 1.0;
+    const int x = qRound(pos.x() / zoom);
+    const int y = qRound(pos.y() / zoom);
+    m_web->page()->runJavaScript(QStringLiteral(
+        "(function(){var x=%1,y=%2,el=document.elementFromPoint(x,y);if(!el)return;"
+        "var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
+        "el.dispatchEvent(new MouseEvent('mousedown',o));"
+        "el.dispatchEvent(new MouseEvent('mouseup',o));"
+        "el.dispatchEvent(new MouseEvent('click',o));})()").arg(x).arg(y));
+}
+
 void MainWindow::resetWebZoom()
 {
     if (m_web)
@@ -634,6 +712,7 @@ void MainWindow::loadBookmarks()
         const int kind = settings.value(key + QStringLiteral("kind"), 0).toInt();
         m_bookmarks[i].kind = (kind == 1 || kind == 2) ? kind : 0;
         m_bookmarks[i].target = settings.value(key + QStringLiteral("target")).toString();
+        m_bookmarks[i].title = settings.value(key + QStringLiteral("title")).toString();
         m_bookmarks[i].position = settings.value(key + QStringLiteral("position"), 0).toInt();
         if (m_bookmarks[i].target.isEmpty())
             m_bookmarks[i].kind = 0;
@@ -647,6 +726,7 @@ void MainWindow::saveBookmarks()
         const QString key = QStringLiteral("bookmarks/%1/").arg(i);
         settings.setValue(key + QStringLiteral("kind"), m_bookmarks[i].kind);
         settings.setValue(key + QStringLiteral("target"), m_bookmarks[i].target);
+        settings.setValue(key + QStringLiteral("title"), m_bookmarks[i].title);
         settings.setValue(key + QStringLiteral("position"), m_bookmarks[i].position);
     }
 }
@@ -661,11 +741,13 @@ QString MainWindow::bookmarkLabel(int index) const
             .arg(qMax(1, mark.position));
     }
     if (mark.kind == 1) {
+        if (!mark.title.isEmpty())
+            return QStringLiteral("%1  %2").arg(index + 1).arg(mark.title);
         const QUrl url(mark.target);
         QString name = url.host();
         if (name.isEmpty())
             name = mark.target;
-        return QStringLiteral("%1  网络  %2").arg(index + 1).arg(name);
+        return QStringLiteral("%1  %2").arg(index + 1).arg(name);
     }
     return QStringLiteral("%1  空").arg(index + 1);
 }
@@ -675,9 +757,15 @@ void MainWindow::refreshBookmarkPopup()
     for (int i = 0; i < 10; ++i) {
         if (!m_bookmarkButtons[i])
             continue;
-        m_bookmarkButtons[i]->setText(bookmarkLabel(i));
+        const QString full = bookmarkLabel(i);
+        const int textWidth = qMax(80, m_bookmarkPopup->width() - 70);
+        const QString shown = QFontMetrics(m_bookmarkButtons[i]->font()).elidedText(full, Qt::ElideRight, textWidth);
+        m_bookmarkButtons[i]->setText(shown);
         m_bookmarkButtons[i]->setEnabled(m_bookmarks[i].kind != 0);
-        QString tip = m_bookmarks[i].target;
+        QString tip = m_bookmarks[i].title;
+        if (!tip.isEmpty())
+            tip += QLatin1Char('\n');
+        tip += m_bookmarks[i].target;
         if (m_bookmarks[i].kind == 1)
             tip += QStringLiteral("\n滚动位置 %1").arg(qMax(0, m_bookmarks[i].position));
         else if (m_bookmarks[i].kind == 2)
@@ -689,7 +777,7 @@ void MainWindow::refreshBookmarkPopup()
 void MainWindow::createBookmarkPopup()
 {
     m_bookmarkPopup = new QWidget(window(), Qt::Popup | Qt::FramelessWindowHint);
-    m_bookmarkPopup->setFixedSize(340, 342);
+    m_bookmarkPopup->setFixedSize(460, 342);
     m_bookmarkPopup->setStyleSheet(QStringLiteral(
         "QWidget { background: #FFFFFF; border: 1px solid #D0D0D0; }"
         "QLabel { border: none; color: #666666; }"
@@ -755,6 +843,7 @@ void MainWindow::saveBookmark(int index)
                 const int line = qMax(1, result.toInt());
                 m_bookmarks[index].kind = 2;
                 m_bookmarks[index].target = path;
+                m_bookmarks[index].title.clear();
                 m_bookmarks[index].position = line;
                 saveBookmarks();
                 refreshBookmarkPopup();
@@ -768,11 +857,21 @@ void MainWindow::saveBookmark(int index)
         return;
     }
     const QString target = url.toString();
-    m_web->page()->runJavaScript(QStringLiteral("(window.pageYOffset||window.scrollY||0)"),
+    m_web->page()->runJavaScript(QStringLiteral(
+        "(function(){"
+        "var name=(document.title||'').replace(/\\s+/g,' ').trim();"
+        "var y=window.pageYOffset||window.scrollY||0;"
+        "return String(y)+'\\n'+name;"
+        "})()"),
         [this, index, target](const QVariant &result) {
+            const QString raw = result.toString();
+            const int split = raw.indexOf(QLatin1Char('\n'));
+            const int y = qMax(0, (split < 0 ? raw : raw.left(split)).toInt());
+            QString title = split < 0 ? QString() : raw.mid(split + 1).trimmed();
             m_bookmarks[index].kind = 1;
             m_bookmarks[index].target = target;
-            m_bookmarks[index].position = qMax(0, result.toInt());
+            m_bookmarks[index].title = title;
+            m_bookmarks[index].position = y;
             saveBookmarks();
             refreshBookmarkPopup();
         });
@@ -827,6 +926,19 @@ void MainWindow::hideFromTaskbar()
 void MainWindow::installSwitcherHook()
 {
 #ifdef Q_OS_WIN
+    const auto releaseIfDown = [](WORD virtualKey) {
+        if ((GetAsyncKeyState(virtualKey) & 0x8000) == 0)
+            return;
+        INPUT input = {};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = virtualKey;
+        input.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &input, sizeof(INPUT));
+    };
+    releaseIfDown(VK_LMENU);
+    releaseIfDown(VK_RMENU);
+    releaseIfDown(VK_MENU);
+
     g_mainWindow = this;
     if (!g_keyboardHook)
         g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardProc, GetModuleHandleW(nullptr), 0);

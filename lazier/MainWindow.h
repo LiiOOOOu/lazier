@@ -21,6 +21,8 @@ public:
 
     bool isCursorOverWeb() const;
     bool shouldHandleWebZoomHotkey() const;
+    bool prepareRevealMouseInput();
+    bool revealHotkeyUsesControl() const;
 
 protected:
     bool nativeEvent(const QByteArray &eventType, void *message, long *result) override;
@@ -36,6 +38,7 @@ private slots:
     void minimizeForSwitcher();
     void restoreFromTray();
     void zoomWebByDelta(int delta);
+    void scrollWebByDelta(int delta);
     void resetWebZoom();
     void setAddressBarVisible(bool visible);
     void updateHistoryButtons();
@@ -53,6 +56,8 @@ private:
     void hideFromTaskbar();
     void installSwitcherHook();
     void removeSwitcherHook();
+    bool revealModifierDown() const;
+    void clickWebAt(const QPoint &pos);
     void loadBookmarks();
     void saveBookmarks();
     void refreshBookmarkPopup();
@@ -62,6 +67,7 @@ private:
     struct ReadingBookmark {
         int kind = 0;
         QString target;
+        QString title;
         int position = 0;
     };
 
@@ -79,6 +85,8 @@ private:
     QString m_currentLocalPath;
     int m_pendingLocalLine = 0;
     int m_pendingWebScroll = -1;
+    bool m_revealPressing = false;
+    QPoint m_revealPressPos;
     QTimer *m_ghostTimer = nullptr;
     QSystemTrayIcon *m_tray = nullptr;
     bool m_ghostMode = false;

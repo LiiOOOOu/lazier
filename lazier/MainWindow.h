@@ -21,6 +21,7 @@ public:
     ~MainWindow() override;
 
     bool isCursorOverWeb() const;
+    bool isCursorOverReader() const;
     bool shouldHandleWebZoomHotkey() const;
     bool prepareRevealMouseInput();
     bool revealHotkeyUsesControl() const;
@@ -40,6 +41,7 @@ private slots:
     void restoreFromTray();
     void zoomWebByDelta(int delta);
     void scrollWebByDelta(int delta);
+    void scrollReaderByDelta(int delta);
     void resetWebZoom();
     void setAddressBarVisible(bool visible);
     void updateHistoryButtons();

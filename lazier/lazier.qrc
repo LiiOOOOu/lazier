@@ -2,6 +2,7 @@
     <qresource prefix="/lazier">
         <file>image/read.svg</file>
         <file>image/fix.png</file>
+        <file>image/fix-tilt.png</file>
         <file>image/transparent.png</file>
         <file>image/percent.png</file>
         <file>image/read.ico</file>

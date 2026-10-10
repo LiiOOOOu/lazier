@@ -6,10 +6,13 @@
 #include <QtCore/QEvent>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
+#include <QtCore/QMimeData>
 #include <QtCore/QSettings>
 #include <QtCore/QTextCodec>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
+#include <QtGui/QDragEnterEvent>
+#include <QtGui/QDropEvent>
 #include <QtGui/QCursor>
 #include <QtGui/QFontMetrics>
 #include <QtGui/QGuiApplication>
@@ -149,6 +152,7 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral("lazier"));
     setWindowIcon(lazierAppIcon());
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowMinMaxButtonsHint);
+    setAcceptDrops(true);
     resize(400, 500);
     loadBookmarks();
 
@@ -226,6 +230,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_reader->setFont(readerFont);
     m_reader->setStyleSheet(QStringLiteral(
         "QPlainTextEdit { background: #FFFFFF; color: #222222; }"));
+    m_reader->setAcceptDrops(false);
     m_reader->hide();
 
     const auto navigate = [this]() {
@@ -251,12 +256,19 @@ MainWindow::MainWindow(QWidget *parent)
     connect(bookmarkButton, &QPushButton::clicked, this, &MainWindow::showBookmarkPopup);
     connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         m_urlEdit->setPlaceholderText(index == 1
-            ? QStringLiteral("输入本地 txt 路径后回车")
+            ? QStringLiteral("输入路径，或把 txt 拖进窗口")
             : QStringLiteral("输入网址后回车"));
     });
     connect(m_backButton, &QPushButton::clicked, m_web, &QWebEngineView::back);
     connect(m_forwardButton, &QPushButton::clicked, m_web, &QWebEngineView::forward);
     connect(m_web, &QWebEngineView::urlChanged, this, [this](const QUrl &url) {
+        if (url.isLocalFile()) {
+            const QFileInfo dropped(url.toLocalFile());
+            if (dropped.suffix().compare(QLatin1String("txt"), Qt::CaseInsensitive) == 0) {
+                openDroppedText(dropped.absoluteFilePath());
+                return;
+            }
+        }
         if (m_sourceCombo->currentIndex() == 0)
             m_urlEdit->setText(url.toString());
         updateHistoryButtons();
@@ -362,6 +374,31 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, long *r
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove
+        || event->type() == QEvent::Drop) {
+        QWidget *widget = qobject_cast<QWidget *>(watched);
+        auto *drop = static_cast<QDropEvent *>(event);
+        const QMimeData *mime = drop->mimeData();
+        QString path;
+        if (widget && (widget == this || isAncestorOf(widget)) && mime && mime->hasUrls()) {
+            const QList<QUrl> urls = mime->urls();
+            for (const QUrl &url : urls) {
+                if (!url.isLocalFile())
+                    continue;
+                const QFileInfo info(url.toLocalFile());
+                if (info.suffix().compare(QLatin1String("txt"), Qt::CaseInsensitive) == 0) {
+                    path = info.absoluteFilePath();
+                    break;
+                }
+            }
+        }
+        if (!path.isEmpty()) {
+            drop->acceptProposedAction();
+            if (event->type() == QEvent::Drop)
+                openDroppedText(path);
+            return true;
+        }
+    }
     if (event->type() == QEvent::Wheel && m_web) {
         QWidget *widget = qobject_cast<QWidget *>(watched);
         if (widget && (widget == m_web || m_web->isAncestorOf(widget))) {
@@ -657,6 +694,15 @@ void MainWindow::showReadingSurface(bool local)
     if (m_web)
         m_web->setVisible(!local);
     updateHistoryButtons();
+}
+
+void MainWindow::openDroppedText(const QString &path)
+{
+    if (m_sourceCombo)
+        m_sourceCombo->setCurrentIndex(1);
+    if (m_urlEdit)
+        m_urlEdit->setText(path);
+    openLocalText(path);
 }
 
 void MainWindow::openLocalText(const QString &pathText, int line)

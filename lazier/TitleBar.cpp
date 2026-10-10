@@ -511,6 +511,8 @@ void TitleBar::setDisplayOpacity(int percent)
     updateTooltip(m_hover);
     update();
     emit displayOpacityChanged(m_displayOpacity);
+    QSettings settings;
+    settings.setValue(QStringLiteral("display/opacity"), m_displayOpacity);
 }
 
 void TitleBar::showOpacityPopup()
@@ -710,6 +712,7 @@ void TitleBar::loadGhostSettings()
         m_ghostOption = 0;
     m_ghostModifiers = settings.value(QStringLiteral("ghost/modifiers"), 0).toInt();
     m_ghostVirtualKey = settings.value(QStringLiteral("ghost/virtualKey"), 0).toInt();
+    m_displayOpacity = qBound(1, settings.value(QStringLiteral("display/opacity"), 100).toInt(), 100);
 }
 
 void TitleBar::saveGhostSettings() const

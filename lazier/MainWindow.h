@@ -5,6 +5,7 @@
 
 class QComboBox;
 class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 class QSystemTrayIcon;
 class QTimer;
@@ -43,6 +44,7 @@ private slots:
     void setAddressBarVisible(bool visible);
     void updateHistoryButtons();
     void openLocalText(const QString &pathText, int line = 1);
+    void openDroppedText(const QString &path);
     void showBookmarkPopup();
     void saveBookmark(int index);
     void openBookmark(int index);
@@ -60,6 +62,7 @@ private:
     void clickWebAt(const QPoint &pos);
     void loadBookmarks();
     void saveBookmarks();
+    void showReadingSurface(bool local);
     void refreshBookmarkPopup();
     QString bookmarkLabel(int index) const;
     void createBookmarkPopup();
@@ -73,6 +76,7 @@ private:
 
     TitleBar *m_titleBar = nullptr;
     QWebEngineView *m_web = nullptr;
+    QPlainTextEdit *m_reader = nullptr;
     QWidget *m_frame = nullptr;
     QWidget *m_addressBar = nullptr;
     QComboBox *m_sourceCombo = nullptr;

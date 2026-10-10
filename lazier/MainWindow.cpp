@@ -304,6 +304,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_ghostTimer, &QTimer::timeout, this, &MainWindow::updateGhostVisual);
     setGhostSettings(m_titleBar->ghostMode(), m_titleBar->ghostEnhanced(),
                      m_titleBar->ghostModifiers(), m_titleBar->ghostVirtualKey());
+    setDisplayOpacity(m_titleBar->displayOpacity());
 
     m_tray = new QSystemTrayIcon(lazierTrayIcon(), this);
     m_tray->setToolTip(QStringLiteral("lazier"));

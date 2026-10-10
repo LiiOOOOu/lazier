@@ -67,6 +67,7 @@ private:
     bool isToggled(Button button) const;
     void drawButtonIcon(QPainter &painter, const QRect &rc, const QPixmap &icon, bool dimmed) const;
     void setDisplayOpacity(int percent);
+    void setStayOnTopEnabled(bool on);
     void showOpacityPopup();
     void showGhostPopup();
     void createGhostPopup();
@@ -82,6 +83,7 @@ private:
 
     QPixmap m_appIcon;
     QPixmap m_pinIcon;
+    QPixmap m_pinIconTilted;
     QPixmap m_ghostIcon;
     QPixmap m_opacityIcon;
     QWidget *m_opacityPopup = nullptr;

@@ -35,6 +35,7 @@
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QScrollBar>
 #include <QtWidgets/QSystemTrayIcon>
 #include <QtWidgets/QToolTip>
 #include <QtWidgets/QVBoxLayout>
@@ -119,6 +120,12 @@ LRESULT CALLBACK mouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                                           Qt::QueuedConnection, Q_ARG(int, int(delta)));
                 return 1;
             }
+        } else if (wParam == WM_MOUSEWHEEL && reveal && g_mainWindow->isCursorOverReader()) {
+            const MSLLHOOKSTRUCT *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
+            const short delta = GET_WHEEL_DELTA_WPARAM(info->mouseData);
+            QMetaObject::invokeMethod(g_mainWindow, "scrollReaderByDelta",
+                                      Qt::QueuedConnection, Q_ARG(int, int(delta)));
+            return 1;
         }
     }
     return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
@@ -317,6 +324,8 @@ MainWindow::MainWindow(QWidget *parent)
     setGhostSettings(m_titleBar->ghostMode(), m_titleBar->ghostEnhanced(),
                      m_titleBar->ghostModifiers(), m_titleBar->ghostVirtualKey());
     setDisplayOpacity(m_titleBar->displayOpacity());
+    if (m_titleBar->stayOnTop())
+        setStayOnTop(true);
 
     m_tray = new QSystemTrayIcon(lazierTrayIcon(), this);
     m_tray->setToolTip(QStringLiteral("lazier"));
@@ -399,6 +408,14 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
     }
+    if (event->type() == QEvent::Wheel && m_reader) {
+        QWidget *widget = qobject_cast<QWidget *>(watched);
+        if (widget && (widget == m_reader || m_reader->isAncestorOf(widget))) {
+            QWheelEvent *wheel = static_cast<QWheelEvent *>(event);
+            scrollReaderByDelta(wheel->angleDelta().y());
+            return true;
+        }
+    }
     if (event->type() == QEvent::Wheel && m_web) {
         QWidget *widget = qobject_cast<QWidget *>(watched);
         if (widget && (widget == m_web || m_web->isAncestorOf(widget))) {
@@ -459,11 +476,14 @@ void MainWindow::setStayOnTop(bool on)
         flags |= Qt::WindowStaysOnTopHint;
     else
         flags &= ~Qt::WindowStaysOnTopHint;
+    const bool wasVisible = isVisible();
     const QRect geom = geometry();
     setWindowFlags(flags);
     setGeometry(geom);
-    show();
-    hideFromTaskbar();
+    if (wasVisible) {
+        show();
+        hideFromTaskbar();
+    }
     updateGhostVisual();
 }
 
@@ -577,7 +597,7 @@ bool MainWindow::isCursorInside() const
 
 bool MainWindow::isCursorOverWeb() const
 {
-    if (!m_web || !isVisible() || isMinimized())
+    if (!m_web || !m_web->isVisible() || !isVisible() || isMinimized())
         return false;
 #ifdef Q_OS_WIN
     POINT pt;
@@ -589,6 +609,22 @@ bool MainWindow::isCursorOverWeb() const
         return false;
 #endif
     return m_web->rect().contains(m_web->mapFromGlobal(QCursor::pos()));
+}
+
+bool MainWindow::isCursorOverReader() const
+{
+    if (!m_reader || !m_reader->isVisible() || !isVisible() || isMinimized())
+        return false;
+#ifdef Q_OS_WIN
+    POINT pt;
+    if (!GetCursorPos(&pt))
+        return false;
+    HWND under = WindowFromPoint(pt);
+    HWND self = reinterpret_cast<HWND>(winId());
+    if (!under || !self || (under != self && !IsChild(self, under)))
+        return false;
+#endif
+    return m_reader->rect().contains(m_reader->mapFromGlobal(QCursor::pos()));
 }
 
 bool MainWindow::shouldHandleWebZoomHotkey() const
@@ -622,6 +658,22 @@ void MainWindow::scrollWebByDelta(int delta)
     if (!m_web || !m_web->page() || delta == 0)
         return;
     m_web->page()->runJavaScript(QStringLiteral("window.scrollBy(0,%1);").arg(-delta));
+}
+
+void MainWindow::scrollReaderByDelta(int delta)
+{
+    if (!m_reader || delta == 0)
+        return;
+    const int notches = delta / 120;
+    if (notches == 0)
+        return;
+    QScrollBar *bar = m_reader->verticalScrollBar();
+    const int line = qMax(1, m_reader->fontMetrics().lineSpacing());
+    int step = bar->singleStep();
+    const int page = qMax(line, bar->pageStep());
+    if (step < 1 || step > line * 2 || step * 2 >= page)
+        step = line;
+    bar->setValue(bar->value() - notches * step);
 }
 
 bool MainWindow::revealModifierDown() const

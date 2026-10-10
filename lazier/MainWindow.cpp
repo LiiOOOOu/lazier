@@ -10,7 +10,6 @@
 #include <QtCore/QTextCodec>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
-#include <QtGui/QColor>
 #include <QtGui/QCursor>
 #include <QtGui/QFontMetrics>
 #include <QtGui/QGuiApplication>
@@ -18,7 +17,9 @@
 #include <QtGui/QIcon>
 #include <QtGui/QPixmap>
 #include <QtGui/QMouseEvent>
-#include <QtGui/QShowEvent>
+#include <QtGui/QTextBlock>
+#include <QtGui/QTextCursor>
+#include <QtGui/QTextOption>
 #include <QtGui/QWheelEvent>
 #include <QtWebEngineWidgets/QWebEngineHistory>
 #include <QtWebEngineWidgets/QWebEnginePage>
@@ -29,6 +30,7 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
+#include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSystemTrayIcon>
 #include <QtWidgets/QToolTip>
@@ -42,37 +44,6 @@
 
 namespace {
 const qreal kGhostOpacity = 0.0;
-
-QString pageHtml(const QString &body)
-{
-    return QStringLiteral(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-        "<style>body{margin:16px;background:#ffffff;color:#222222;"
-        "font-family:'Microsoft YaHei',sans-serif;font-size:16px;line-height:1.7;"
-        "white-space:pre-wrap;word-wrap:break-word;}</style></head><body>%1</body></html>")
-        .arg(body.toHtmlEscaped());
-}
-
-QString localTextHtml(const QString &text)
-{
-    const QStringList lines = text.split(QLatin1Char('\n'));
-    QString body;
-    for (int i = 0; i < lines.size(); ++i) {
-        QString line = lines.at(i);
-        if (line.endsWith(QLatin1Char('\r')))
-            line.chop(1);
-        body += QStringLiteral("<div id=\"ln-%1\">%2</div>")
-                    .arg(i + 1)
-                    .arg(line.isEmpty() ? QStringLiteral("&nbsp;") : line.toHtmlEscaped());
-    }
-    return QStringLiteral(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-        "<style>body{margin:16px;background:#ffffff;color:#222222;"
-        "font-family:'Microsoft YaHei',sans-serif;font-size:16px;line-height:1.7;}"
-        "#reader div{white-space:pre-wrap;word-wrap:break-word;min-height:1.7em;}</style>"
-        "</head><body><div id=\"reader\">%1</div></body></html>")
-        .arg(body);
-}
 
 QString decodeTextFile(const QByteArray &bytes)
 {
@@ -243,6 +214,19 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_web = new QWebEngineView(m_frame);
     m_web->setUrl(QUrl(QStringLiteral("about:blank")));
+    m_reader = new QPlainTextEdit(m_frame);
+    m_reader->setReadOnly(true);
+    m_reader->setFrameStyle(QFrame::NoFrame);
+    m_reader->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    m_reader->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_reader->setUndoRedoEnabled(false);
+    m_reader->document()->setDocumentMargin(16);
+    QFont readerFont(QStringLiteral("Microsoft YaHei"));
+    readerFont.setPixelSize(16);
+    m_reader->setFont(readerFont);
+    m_reader->setStyleSheet(QStringLiteral(
+        "QPlainTextEdit { background: #FFFFFF; color: #222222; }"));
+    m_reader->hide();
 
     const auto navigate = [this]() {
         m_pendingLocalLine = 0;
@@ -252,6 +236,7 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
         m_currentLocalPath.clear();
+        showReadingSurface(false);
         QString text = m_urlEdit->text().trimmed();
         if (text.isEmpty()) {
             m_web->setUrl(QUrl(QStringLiteral("about:blank")));
@@ -310,6 +295,7 @@ MainWindow::MainWindow(QWidget *parent)
     layout->addWidget(m_titleBar);
     layout->addWidget(m_addressBar);
     layout->addWidget(m_web, 1);
+    layout->addWidget(m_reader, 1);
     setCentralWidget(m_frame);
     updateFrame();
 
@@ -655,11 +641,21 @@ void MainWindow::setAddressBarVisible(bool visible)
 
 void MainWindow::updateHistoryButtons()
 {
+    const bool local = m_reader && m_reader->isVisible();
     QWebEngineHistory *history = m_web ? m_web->history() : nullptr;
     if (m_backButton)
-        m_backButton->setEnabled(history && history->canGoBack());
+        m_backButton->setEnabled(!local && history && history->canGoBack());
     if (m_forwardButton)
-        m_forwardButton->setEnabled(history && history->canGoForward());
+        m_forwardButton->setEnabled(!local && history && history->canGoForward());
+}
+
+void MainWindow::showReadingSurface(bool local)
+{
+    if (m_reader)
+        m_reader->setVisible(local);
+    if (m_web)
+        m_web->setVisible(!local);
+    updateHistoryButtons();
 }
 
 void MainWindow::openLocalText(const QString &pathText, int line)
@@ -670,38 +666,43 @@ void MainWindow::openLocalText(const QString &pathText, int line)
         path = path.mid(1, path.size() - 2).trimmed();
     if (path.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive))
         path = QUrl(path).toLocalFile();
-    if (path.isEmpty()) {
+
+    const auto showMessage = [this](const QString &message) {
         m_currentLocalPath.clear();
         m_pendingLocalLine = 0;
-        m_web->setHtml(pageHtml(QStringLiteral("请输入 txt 文件路径")));
+        showReadingSurface(true);
+        m_reader->setPlainText(message);
+    };
+    if (path.isEmpty()) {
+        showMessage(QStringLiteral("请输入 txt 文件路径"));
         return;
     }
 
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile()) {
-        m_currentLocalPath.clear();
-        m_pendingLocalLine = 0;
-        m_web->setHtml(pageHtml(QStringLiteral("找不到文件：%1").arg(path)));
+        showMessage(QStringLiteral("找不到文件：%1").arg(path));
         return;
     }
     if (info.suffix().compare(QLatin1String("txt"), Qt::CaseInsensitive) != 0) {
-        m_currentLocalPath.clear();
-        m_pendingLocalLine = 0;
-        m_web->setHtml(pageHtml(QStringLiteral("本地模式只打开 txt 文件")));
+        showMessage(QStringLiteral("本地模式只打开 txt 文件"));
         return;
     }
 
     QFile file(info.absoluteFilePath());
     if (!file.open(QIODevice::ReadOnly)) {
-        m_currentLocalPath.clear();
-        m_pendingLocalLine = 0;
-        m_web->setHtml(pageHtml(QStringLiteral("无法打开文件：%1").arg(info.absoluteFilePath())));
+        showMessage(QStringLiteral("无法打开文件：%1").arg(info.absoluteFilePath()));
         return;
     }
+    const QString text = decodeTextFile(file.readAll());
+    file.close();
+    showReadingSurface(true);
+    m_reader->setPlainText(text);
     m_currentLocalPath = info.absoluteFilePath();
-    m_pendingLocalLine = line;
-    m_web->setHtml(localTextHtml(decodeTextFile(file.readAll())),
-                   QUrl::fromLocalFile(info.absolutePath() + QLatin1Char('/')));
+    m_pendingLocalLine = 0;
+    const int blockNumber = qBound(0, line - 1, qMax(0, m_reader->blockCount() - 1));
+    QTextCursor cursor(m_reader->document()->findBlockByNumber(blockNumber));
+    m_reader->setTextCursor(cursor);
+    m_reader->ensureCursorVisible();
 }
 
 void MainWindow::loadBookmarks()
@@ -824,33 +825,26 @@ void MainWindow::showBookmarkPopup()
 
 void MainWindow::saveBookmark(int index)
 {
-    if (index < 0 || index >= 10 || !m_web || !m_web->page())
+    if (index < 0 || index >= 10)
         return;
     const bool localMode = m_sourceCombo && m_sourceCombo->currentIndex() == 1;
     if (localMode) {
-        if (m_currentLocalPath.isEmpty()) {
+        if (m_currentLocalPath.isEmpty() || !m_reader) {
             QToolTip::showText(QCursor::pos(), QStringLiteral("请先打开 txt"));
             return;
         }
-        const QString path = m_currentLocalPath;
-        m_web->page()->runJavaScript(QStringLiteral(
-            "(function(){var y=window.pageYOffset||0;"
-            "var nodes=document.querySelectorAll('[id^=ln-]');"
-            "if(!nodes.length)return 0;"
-            "var line=1;for(var i=0;i<nodes.length;i++){"
-            "if(nodes[i].offsetTop<=y+4)line=i+1;else break;}return line;})()"),
-            [this, index, path](const QVariant &result) {
-                const int line = qMax(1, result.toInt());
-                m_bookmarks[index].kind = 2;
-                m_bookmarks[index].target = path;
-                m_bookmarks[index].title.clear();
-                m_bookmarks[index].position = line;
-                saveBookmarks();
-                refreshBookmarkPopup();
-            });
+        const int line = m_reader->cursorForPosition(QPoint(8, 8)).blockNumber() + 1;
+        m_bookmarks[index].kind = 2;
+        m_bookmarks[index].target = m_currentLocalPath;
+        m_bookmarks[index].title.clear();
+        m_bookmarks[index].position = qMax(1, line);
+        saveBookmarks();
+        refreshBookmarkPopup();
         return;
     }
 
+    if (!m_web || !m_web->page())
+        return;
     const QUrl url = m_web->url();
     if (url.scheme() != QLatin1String("http") && url.scheme() != QLatin1String("https")) {
         QToolTip::showText(QCursor::pos(), QStringLiteral("请先打开网页"));
@@ -897,6 +891,7 @@ void MainWindow::openBookmark(int index)
     m_currentLocalPath.clear();
     m_pendingLocalLine = 0;
     m_pendingWebScroll = qMax(0, mark.position);
+    showReadingSurface(false);
     if (m_sourceCombo)
         m_sourceCombo->setCurrentIndex(0);
     if (m_urlEdit)

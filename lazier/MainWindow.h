@@ -48,6 +48,7 @@ private slots:
     void setAddressBarVisible(bool visible);
     void updateHistoryButtons();
     void openLocalText(const QString &pathText, int line = 1);
+    void jumpToLocalLine();
     void openDroppedText(const QString &path);
     void showBookmarkPopup();
     void saveBookmark(int index);

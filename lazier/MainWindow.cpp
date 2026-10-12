@@ -32,12 +32,14 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollBar>
+#include <QtWidgets/QShortcut>
 #include <QtWidgets/QSystemTrayIcon>
 #include <QtWidgets/QToolTip>
 #include <QtWidgets/QVBoxLayout>
@@ -275,6 +277,8 @@ MainWindow::MainWindow(QWidget *parent)
         "QPlainTextEdit { background: #FFFFFF; color: #222222; }"));
     m_reader->setAcceptDrops(false);
     m_reader->hide();
+    QShortcut *jumpLine = new QShortcut(QKeySequence(QStringLiteral("Ctrl+G")), this);
+    connect(jumpLine, &QShortcut::activated, this, &MainWindow::jumpToLocalLine);
 
     const auto navigate = [this]() {
         m_pendingLocalLine = 0;
@@ -924,6 +928,25 @@ void MainWindow::openLocalText(const QString &pathText, int line)
     QTextCursor cursor(m_reader->document()->findBlockByNumber(blockNumber));
     m_reader->setTextCursor(cursor);
     m_reader->ensureCursorVisible();
+}
+
+void MainWindow::jumpToLocalLine()
+{
+    if (!m_reader || !m_reader->isVisible() || m_currentLocalPath.isEmpty())
+        return;
+    const int count = qMax(1, m_reader->blockCount());
+    const int current = qBound(1, m_reader->textCursor().blockNumber() + 1, count);
+    bool ok = false;
+    const int line = QInputDialog::getInt(this, QStringLiteral("跳转到行"),
+                                           QStringLiteral("行号（1–%1）").arg(count),
+                                           current, 1, count, 1, &ok);
+    if (!ok)
+        return;
+    const int blockNumber = qBound(0, line - 1, count - 1);
+    QTextCursor cursor(m_reader->document()->findBlockByNumber(blockNumber));
+    m_reader->setTextCursor(cursor);
+    m_reader->ensureCursorVisible();
+    m_reader->setFocus();
 }
 
 void MainWindow::loadBookmarks()

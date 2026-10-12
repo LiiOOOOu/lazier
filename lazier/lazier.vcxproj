@@ -219,6 +219,7 @@
     <ClInclude Include="Icons.h" />
     <None Include="image\read.svg" />
     <None Include="image\fix.png" />
+    <None Include="image\fix-tilt.png" />
     <None Include="image\transparent.png" />
     <None Include="image\percent.png" />
     <None Include="image\read.ico" />

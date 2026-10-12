@@ -152,6 +152,7 @@ TitleBar::TitleBar(QWidget *parent)
     setAttribute(Qt::WA_Hover);
     m_appIcon = lazierAppPixmap(16);
     m_pinIcon.load(QStringLiteral(":/lazier/image/fix.png"));
+    m_pinIconTilted.load(QStringLiteral(":/lazier/image/fix-tilt.png"));
     m_ghostIcon.load(QStringLiteral(":/lazier/image/transparent.png"));
     m_opacityIcon.load(QStringLiteral(":/lazier/image/percent.png"));
     loadGhostSettings();
@@ -199,10 +200,8 @@ bool TitleBar::addressBarVisible() const
 
 void TitleBar::resetToDefaults()
 {
-    if (m_stayOnTop) {
-        m_stayOnTop = false;
-        emit stayOnTopChanged(false);
-    }
+    if (m_stayOnTop)
+        setStayOnTopEnabled(false);
     if (m_ghostOption != 0) {
         m_ghostOption = 0;
         saveGhostSettings();
@@ -346,7 +345,7 @@ void TitleBar::paintEvent(QPaintEvent *)
         const QPoint c = rc.center();
         const int half = kIcon / 2;
         if (button == Pin) {
-            drawButtonIcon(painter, rc, m_pinIcon, !toggled && !hovered);
+            drawButtonIcon(painter, rc, toggled ? m_pinIconTilted : m_pinIcon, !toggled && !hovered);
         } else if (button == Ghost) {
             drawButtonIcon(painter, rc, m_ghostIcon, !toggled && !hovered);
         } else if (button == Opacity) {
@@ -456,9 +455,7 @@ void TitleBar::mouseReleaseEvent(QMouseEvent *event)
     } else if (released == Close) {
         window()->close();
     } else if (released == Pin) {
-        m_stayOnTop = !m_stayOnTop;
-        update();
-        emit stayOnTopChanged(m_stayOnTop);
+        setStayOnTopEnabled(!m_stayOnTop);
     } else if (released == Ghost) {
         showGhostPopup();
     } else if (released == Opacity) {
@@ -496,6 +493,17 @@ void TitleBar::wheelEvent(QWheelEvent *event)
     if (steps != 0)
         setDisplayOpacity(m_displayOpacity + steps * 5);
     event->accept();
+}
+
+void TitleBar::setStayOnTopEnabled(bool on)
+{
+    if (m_stayOnTop == on)
+        return;
+    m_stayOnTop = on;
+    QSettings settings;
+    settings.setValue(QStringLiteral("window/stayOnTop"), m_stayOnTop);
+    update();
+    emit stayOnTopChanged(m_stayOnTop);
 }
 
 void TitleBar::setDisplayOpacity(int percent)
@@ -713,6 +721,7 @@ void TitleBar::loadGhostSettings()
     m_ghostModifiers = settings.value(QStringLiteral("ghost/modifiers"), 0).toInt();
     m_ghostVirtualKey = settings.value(QStringLiteral("ghost/virtualKey"), 0).toInt();
     m_displayOpacity = qBound(1, settings.value(QStringLiteral("display/opacity"), 100).toInt(), 100);
+    m_stayOnTop = settings.value(QStringLiteral("window/stayOnTop"), false).toBool();
 }
 
 void TitleBar::saveGhostSettings() const

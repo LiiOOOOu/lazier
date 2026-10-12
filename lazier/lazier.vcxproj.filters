@@ -24,6 +24,9 @@
     <None Include="image\fix.png">
       <Filter>Resource Files</Filter>
     </None>
+    <None Include="image\fix-tilt.png">
+      <Filter>Resource Files</Filter>
+    </None>
     <None Include="image\transparent.png">
       <Filter>Resource Files</Filter>
     </None>

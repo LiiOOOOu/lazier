@@ -387,6 +387,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    saveWindowGeometry();
     rememberLocalReading();
     removeSwitcherHook();
 }
@@ -509,6 +510,10 @@ void MainWindow::changeEvent(QEvent *event)
 void MainWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
+    if (!m_geometryRestored) {
+        m_geometryRestored = true;
+        restoreWindowGeometry();
+    }
     hideFromTaskbar();
     m_revealSize = QSize();
     applyRevealMask(m_revealTitle, m_revealContent);
@@ -1248,6 +1253,49 @@ Qt::Edges MainWindow::edgeAt(const QPoint &pos) const
     if (pos.y() >= height() - BorderWidth)
         edges |= Qt::BottomEdge;
     return edges;
+}
+
+void MainWindow::restoreWindowGeometry()
+{
+    QSettings settings;
+    const QRect saved = settings.value(QStringLiteral("window/geometry")).toRect();
+    const bool maximized = settings.value(QStringLiteral("window/maximized"), false).toBool();
+    QRect geom = saved;
+    bool placed = geom.width() >= 160 && geom.height() >= 120;
+    if (placed) {
+        placed = false;
+        const QList<QScreen *> screens = QGuiApplication::screens();
+        for (QScreen *screen : screens) {
+            if (screen->availableGeometry().intersects(geom)) {
+                placed = true;
+                break;
+            }
+        }
+    }
+    if (!placed) {
+        QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
+        if (!screen)
+            screen = QGuiApplication::primaryScreen();
+        if (!screen)
+            return;
+        geom = QRect(QPoint(), size().expandedTo(QSize(400, 500)));
+        geom.moveCenter(screen->availableGeometry().center());
+    }
+    setGeometry(geom);
+    if (placed && maximized)
+        setWindowState(windowState() | Qt::WindowMaximized);
+}
+
+void MainWindow::saveWindowGeometry() const
+{
+    if (isMinimized())
+        return;
+    const QRect geom = isMaximized() ? normalGeometry() : geometry();
+    if (geom.width() < 160 || geom.height() < 120)
+        return;
+    QSettings settings;
+    settings.setValue(QStringLiteral("window/geometry"), geom);
+    settings.setValue(QStringLiteral("window/maximized"), isMaximized());
 }
 
 void MainWindow::updateFrame()

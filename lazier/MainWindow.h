@@ -62,6 +62,8 @@ private:
     bool isCursorInside() const;
     bool isCursorOverTitleBar() const;
     void applyRevealMask(bool showTitle, bool showContent);
+    void restoreWindowGeometry();
+    void saveWindowGeometry() const;
     void hideFromTaskbar();
     void installSwitcherHook();
     void removeSwitcherHook();
@@ -111,6 +113,7 @@ private:
     bool m_revealTitle = true;
     bool m_revealContent = true;
     bool m_revealZoomed = false;
+    bool m_geometryRestored = false;
     QSize m_revealSize;
     int m_ghostModifiers = 0;
     int m_ghostVirtualKey = 0;

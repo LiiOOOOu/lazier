@@ -31,10 +31,12 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void changeEvent(QEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private slots:
     void setStayOnTop(bool on);
     void setGhostSettings(bool enabled, bool enhanced, int modifiers, int virtualKey);
+    void setTitleHover(bool enabled);
     void setDisplayOpacity(int percent);
     void updateGhostVisual();
     void minimizeForSwitcher();
@@ -57,6 +59,8 @@ private:
     Qt::Edges edgeAt(const QPoint &pos) const;
     void updateFrame();
     bool isCursorInside() const;
+    bool isCursorOverTitleBar() const;
+    void applyRevealMask(bool showTitle, bool showContent);
     void hideFromTaskbar();
     void installSwitcherHook();
     void removeSwitcherHook();
@@ -101,6 +105,12 @@ private:
     bool m_ghostWatchingEnter = false;
     bool m_ghostCursorWasInside = false;
     bool m_ghostEnhanced = false;
+    bool m_titleHover = false;
+    bool m_webHiddenForReveal = false;
+    bool m_revealTitle = true;
+    bool m_revealContent = true;
+    bool m_revealZoomed = false;
+    QSize m_revealSize;
     int m_ghostModifiers = 0;
     int m_ghostVirtualKey = 0;
     int m_displayOpacity = 100;

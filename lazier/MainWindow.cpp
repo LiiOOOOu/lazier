@@ -18,7 +18,9 @@
 #include <QtGui/QGuiApplication>
 #include <QtGui/QScreen>
 #include <QtGui/QIcon>
-#include <QtGui/QPixmap>
+#include <QtGui/QBitmap>
+#include <QtGui/QPainter>
+#include <QtGui/QPainterPath>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QTextBlock>
 #include <QtGui/QTextCursor>
@@ -47,7 +49,40 @@
 #endif
 
 namespace {
-const qreal kGhostOpacity = 0.0;
+
+QRegion roundedRegion(const QRect &rect, int radius, bool roundTop, bool roundBottom)
+{
+    if (radius <= 1 || rect.width() < 2 || rect.height() < 2 || (!roundTop && !roundBottom))
+        return QRegion(rect);
+    radius = qMin(radius, qMin(rect.width(), rect.height()) / 2);
+    QPainterPath path;
+    const QRectF r(0, 0, rect.width(), rect.height());
+    const qreal rad = radius;
+    path.moveTo(r.left() + (roundTop ? rad : 0), r.top());
+    path.lineTo(r.right() - (roundTop ? rad : 0), r.top());
+    if (roundTop)
+        path.arcTo(r.right() - 2 * rad, r.top(), 2 * rad, 2 * rad, 90, -90);
+    path.lineTo(r.right(), r.bottom() - (roundBottom ? rad : 0));
+    if (roundBottom)
+        path.arcTo(r.right() - 2 * rad, r.bottom() - 2 * rad, 2 * rad, 2 * rad, 0, -90);
+    path.lineTo(r.left() + (roundBottom ? rad : 0), r.bottom());
+    if (roundBottom)
+        path.arcTo(r.left(), r.bottom() - 2 * rad, 2 * rad, 2 * rad, 270, -90);
+    path.lineTo(r.left(), r.top() + (roundTop ? rad : 0));
+    if (roundTop)
+        path.arcTo(r.left(), r.top(), 2 * rad, 2 * rad, 180, -90);
+    path.closeSubpath();
+    QBitmap bitmap(rect.size());
+    bitmap.fill(Qt::color0);
+    QPainter painter(&bitmap);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Qt::color1);
+    painter.drawPath(path);
+    painter.end();
+    QRegion region(bitmap);
+    region.translate(rect.topLeft());
+    return region;
+}
 
 QString decodeTextFile(const QByteArray &bytes)
 {
@@ -165,11 +200,12 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_frame = new QWidget(this);
     m_frame->setObjectName(QStringLiteral("windowFrame"));
-    m_frame->setStyleSheet(QStringLiteral("#windowFrame { background: #1A1A1A; }"));
+    m_frame->setStyleSheet(QStringLiteral("#windowFrame { background: #FFFFFF; }"));
 
     m_titleBar = new TitleBar(m_frame);
     connect(m_titleBar, &TitleBar::stayOnTopChanged, this, &MainWindow::setStayOnTop);
     connect(m_titleBar, &TitleBar::ghostSettingsChanged, this, &MainWindow::setGhostSettings);
+    connect(m_titleBar, &TitleBar::titleHoverChanged, this, &MainWindow::setTitleHover);
     connect(m_titleBar, &TitleBar::displayOpacityChanged, this, &MainWindow::setDisplayOpacity);
     connect(m_titleBar, &TitleBar::addressBarVisibleChanged, this, &MainWindow::setAddressBarVisible);
 
@@ -316,6 +352,7 @@ MainWindow::MainWindow(QWidget *parent)
     layout->addWidget(m_web, 1);
     layout->addWidget(m_reader, 1);
     setCentralWidget(m_frame);
+    m_titleBar->raise();
     updateFrame();
 
     m_ghostTimer = new QTimer(this);
@@ -323,6 +360,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_ghostTimer, &QTimer::timeout, this, &MainWindow::updateGhostVisual);
     setGhostSettings(m_titleBar->ghostMode(), m_titleBar->ghostEnhanced(),
                      m_titleBar->ghostModifiers(), m_titleBar->ghostVirtualKey());
+    setTitleHover(m_titleBar->titleHover());
     setDisplayOpacity(m_titleBar->displayOpacity());
     if (m_titleBar->stayOnTop())
         setStayOnTop(true);
@@ -352,9 +390,9 @@ MainWindow::~MainWindow()
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, long *result)
 {
 #ifdef Q_OS_WIN
-    if (eventType == "windows_generic_MSG" && !isMaximized()) {
+    if (eventType == "windows_generic_MSG") {
         MSG *msg = static_cast<MSG *>(message);
-        if (msg->message == WM_NCHITTEST) {
+        if (msg->message == WM_NCHITTEST && !isMaximized()) {
             const QPoint global(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
             const Qt::Edges edges = edgeAt(mapFromGlobal(global));
             if (edges) {
@@ -443,7 +481,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             }
         }
     }
-    if (m_ghostMode
+    if ((m_ghostMode || m_titleHover)
         && (event->type() == QEvent::Enter || event->type() == QEvent::Leave
             || event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverLeave)) {
         QWidget *widget = qobject_cast<QWidget *>(watched);
@@ -468,6 +506,14 @@ void MainWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
     hideFromTaskbar();
+    m_revealSize = QSize();
+    applyRevealMask(m_revealTitle, m_revealContent);
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    applyRevealMask(m_revealTitle, m_revealContent);
 }
 
 void MainWindow::setStayOnTop(bool on)
@@ -498,12 +544,23 @@ void MainWindow::setGhostSettings(bool enabled, bool enhanced, int modifiers, in
     if (!m_ghostMode) {
         m_ghostArmed = false;
         m_ghostWatchingEnter = false;
-        m_ghostTimer->stop();
+        if (!m_titleHover)
+            m_ghostTimer->stop();
     } else {
         if (!wasEnabled && isVisible())
             m_ghostArmed = true;
         m_ghostTimer->start();
     }
+    updateGhostVisual();
+}
+
+void MainWindow::setTitleHover(bool enabled)
+{
+    m_titleHover = enabled;
+    if (m_titleHover)
+        m_ghostTimer->start();
+    else if (!m_ghostMode)
+        m_ghostTimer->stop();
     updateGhostVisual();
 }
 
@@ -534,24 +591,35 @@ void MainWindow::updateGhostVisual()
     }
     m_ghostCursorWasInside = inside;
 
-    bool show = true;
+    bool showContent = true;
     if (m_ghostMode && m_ghostArmed) {
-        show = inside;
-        if (show && hotkeyMode) {
+        showContent = inside;
+        if (showContent && hotkeyMode) {
 #ifdef Q_OS_WIN
-            show = ghostHotkeyHeld(m_ghostModifiers, m_ghostVirtualKey);
+            showContent = ghostHotkeyHeld(m_ghostModifiers, m_ghostVirtualKey);
 #else
-            show = true;
+            showContent = true;
 #endif
         }
     }
-    if (!show) {
-        if (m_bookmarkPopup && m_bookmarkPopup->isVisible())
-            m_bookmarkPopup->hide();
-        setWindowOpacity(kGhostOpacity);
-        return;
+    if (!showContent && m_bookmarkPopup && m_bookmarkPopup->isVisible())
+        m_bookmarkPopup->hide();
+    if (!showContent) {
+        if (m_web && m_web->isVisible()) {
+            m_webHiddenForReveal = true;
+            m_web->hide();
+        }
+        if (m_titleBar)
+            m_titleBar->raise();
+    } else if (m_webHiddenForReveal) {
+        m_webHiddenForReveal = false;
+        if (m_web && !(m_reader && m_reader->isVisible()))
+            m_web->show();
     }
-    setWindowOpacity(m_displayOpacity / 100.0);
+    const bool showTitle = !m_titleHover || isCursorOverTitleBar()
+        || (m_titleBar && m_titleBar->chromePopupVisible());
+    applyRevealMask(showTitle, showContent);
+    setWindowOpacity((showTitle || showContent) ? m_displayOpacity / 100.0 : 0.0);
 }
 
 void MainWindow::minimizeForSwitcher()
@@ -594,6 +662,59 @@ void MainWindow::restoreFromTray()
 bool MainWindow::isCursorInside() const
 {
     return frameGeometry().contains(QCursor::pos());
+}
+
+bool MainWindow::isCursorOverTitleBar() const
+{
+    if (!m_titleBar || !isVisible() || isMinimized())
+        return false;
+    const QPoint origin = mapToGlobal(QPoint(0, 0));
+    const int split = m_titleBar->mapTo(this, QPoint(0, m_titleBar->height())).y();
+    return QRect(origin, QSize(width(), qMax(1, split))).contains(QCursor::pos());
+}
+
+void MainWindow::applyRevealMask(bool showTitle, bool showContent)
+{
+    const QSize size = this->size();
+    const bool zoomed = isMaximized();
+    if (m_revealTitle == showTitle && m_revealContent == showContent
+        && m_revealSize == size && m_revealZoomed == zoomed)
+        return;
+    m_revealTitle = showTitle;
+    m_revealContent = showContent;
+    m_revealSize = size;
+    m_revealZoomed = zoomed;
+    updateFrame();
+    if (m_frame && m_frame->layout())
+        m_frame->layout()->activate();
+    if ((!showTitle && !showContent) || size.width() < 2 || size.height() < 2) {
+        clearMask();
+        return;
+    }
+    // Win11 普通窗口圆角是 8 逻辑像素，最大化贴边时系统用直角
+    const int radius = zoomed ? 0 : 8;
+    if (showTitle && showContent) {
+        if (radius == 0)
+            clearMask();
+        else
+            setMask(roundedRegion(QRect(0, 0, size.width(), size.height()), radius, true, true));
+        return;
+    }
+    if (!m_titleBar)
+        return;
+    const QRect titleRect(m_titleBar->mapTo(this, QPoint(0, 0)), m_titleBar->size());
+    if (showTitle) {
+        // 只留标题栏本身，暗色外边框留在区域外，避免藏主窗口时变成黑条
+        if (radius == 0)
+            setMask(QRegion(titleRect));
+        else
+            setMask(roundedRegion(titleRect, radius, true, false));
+        m_titleBar->raise();
+        m_titleBar->update();
+        return;
+    }
+    const QRect contentRect(0, titleRect.bottom() + 1, width(), qMax(0, height() - titleRect.bottom() - 1));
+    setMask(roundedRegion(contentRect, radius, true, true));
 }
 
 bool MainWindow::isCursorOverWeb() const
@@ -1110,6 +1231,5 @@ void MainWindow::updateFrame()
 {
     if (!m_frame || !m_frame->layout())
         return;
-    const int border = isMaximized() ? 0 : 1;
-    m_frame->layout()->setContentsMargins(border, border, border, border);
+    m_frame->layout()->setContentsMargins(0, 0, 0, 0);
 }

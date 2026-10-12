@@ -8,6 +8,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QPalette>
 #include <QtGui/QPixmap>
 #include <QtGui/QWheelEvent>
 #include <QtWidgets/QButtonGroup>
@@ -27,7 +28,7 @@ namespace {
 const int kHeight = 30;
 const int kButtonWidth = 28;
 const int kIcon = 8;
-const int kButtonRightPad = 6;
+const int kButtonRightPad = 0;
 
 QString virtualKeyText(int virtualKey)
 {
@@ -139,6 +140,7 @@ const TitleBar::Button TitleBar::kButtonOrder[TitleBar::kButtonCount] = {
     TitleBar::Maximize,
     TitleBar::Minimize,
     TitleBar::Ghost,
+    TitleBar::TitleHover,
     TitleBar::Pin,
     TitleBar::Opacity,
     TitleBar::ToggleAddress
@@ -150,6 +152,12 @@ TitleBar::TitleBar(QWidget *parent)
     setFixedHeight(kHeight);
     setMouseTracking(true);
     setAttribute(Qt::WA_Hover);
+    setAttribute(Qt::WA_NativeWindow);
+    setAttribute(Qt::WA_OpaquePaintEvent);
+    setAutoFillBackground(true);
+    QPalette pal = palette();
+    pal.setColor(QPalette::Window, Qt::white);
+    setPalette(pal);
     m_appIcon = lazierAppPixmap(16);
     m_pinIcon.load(QStringLiteral(":/lazier/image/fix.png"));
     m_pinIconTilted.load(QStringLiteral(":/lazier/image/fix-tilt.png"));
@@ -188,6 +196,17 @@ int TitleBar::ghostVirtualKey() const
     return m_ghostVirtualKey;
 }
 
+bool TitleBar::titleHover() const
+{
+    return m_titleHover;
+}
+
+bool TitleBar::chromePopupVisible() const
+{
+    return (m_ghostPopup && m_ghostPopup->isVisible())
+        || (m_opacityPopup && m_opacityPopup->isVisible());
+}
+
 int TitleBar::displayOpacity() const
 {
     return m_displayOpacity;
@@ -207,6 +226,8 @@ void TitleBar::resetToDefaults()
         saveGhostSettings();
         emitGhostSettings();
     }
+    if (m_titleHover)
+        setTitleHoverEnabled(false);
     setDisplayOpacity(100);
     if (!m_addressBarVisible) {
         m_addressBarVisible = true;
@@ -227,8 +248,10 @@ TitleBar::Button TitleBar::hitTest(const QPoint &pos) const
 QRect TitleBar::buttonRect(Button button) const
 {
     for (int i = 0; i < kButtonCount; ++i) {
-        if (kButtonOrder[i] == button)
-            return QRect(width() - kButtonRightPad - (i + 1) * kButtonWidth, 0, kButtonWidth, height());
+        if (kButtonOrder[i] != button)
+            continue;
+        const int x = width() - kButtonRightPad - (i + 1) * kButtonWidth;
+        return QRect(x, 0, kButtonWidth, height());
     }
     return QRect();
 }
@@ -249,14 +272,18 @@ void TitleBar::updateTooltip(Button button)
     else if (button == Ghost) {
         const QString hotkey = ghostHotkeyText(m_ghostModifiers, m_ghostVirtualKey);
         if (m_ghostOption == 2 && !hotkey.isEmpty())
-            setToolTip(QStringLiteral("按住 %1，鼠标在窗口上才显示").arg(hotkey));
+            setToolTip(QStringLiteral("按住 %1，鼠标在主窗口上才显示").arg(hotkey));
         else if (m_ghostOption == 2)
             setToolTip(QStringLiteral("增强：请先录入按键，未设置时仍按鼠标显示"));
         else if (m_ghostOption == 1)
-            setToolTip(QStringLiteral("鼠标在窗口上才显示"));
+            setToolTip(QStringLiteral("鼠标在主窗口上才显示"));
         else
-            setToolTip(QStringLiteral("透明设置"));
+            setToolTip(QStringLiteral("主窗口透明设置"));
     }
+    else if (button == TitleHover)
+        setToolTip(m_titleHover
+            ? QStringLiteral("鼠标在标题栏上才显示")
+            : QStringLiteral("标题栏始终显示"));
     else if (button == Opacity)
         setToolTip(QStringLiteral("正常显示透明度: %1").arg(m_displayOpacity));
     else if (button == ToggleAddress)
@@ -269,6 +296,7 @@ bool TitleBar::isToggled(Button button) const
 {
     return (button == Pin && m_stayOnTop)
         || (button == Ghost && m_ghostOption != 0)
+        || (button == TitleHover && m_titleHover)
         || (button == Opacity && m_displayOpacity < 100)
         || (button == ToggleAddress && !m_addressBarVisible);
 }
@@ -348,6 +376,10 @@ void TitleBar::paintEvent(QPaintEvent *)
             drawButtonIcon(painter, rc, toggled ? m_pinIconTilted : m_pinIcon, !toggled && !hovered);
         } else if (button == Ghost) {
             drawButtonIcon(painter, rc, m_ghostIcon, !toggled && !hovered);
+        } else if (button == TitleHover) {
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(QRect(c.x() - half, c.y() - half, kIcon, kIcon));
+            painter.fillRect(QRect(c.x() - half + 1, c.y() - half + 1, kIcon - 2, 3), iconColor);
         } else if (button == Opacity) {
             drawButtonIcon(painter, rc, m_opacityIcon, !toggled && !hovered);
         } else if (button == ToggleAddress) {
@@ -458,6 +490,8 @@ void TitleBar::mouseReleaseEvent(QMouseEvent *event)
         setStayOnTopEnabled(!m_stayOnTop);
     } else if (released == Ghost) {
         showGhostPopup();
+    } else if (released == TitleHover) {
+        setTitleHoverEnabled(!m_titleHover);
     } else if (released == Opacity) {
         showOpacityPopup();
     } else if (released == ToggleAddress) {
@@ -594,7 +628,7 @@ void TitleBar::createGhostPopup()
     m_ghostOff = new QRadioButton(QStringLiteral("关闭"), m_ghostPopup);
     m_ghostMouse = new QRadioButton(QStringLiteral("鼠标（默认）"), m_ghostPopup);
     m_ghostEnhancedButton = new QRadioButton(QStringLiteral("增强"), m_ghostPopup);
-    m_ghostMouse->setToolTip(QStringLiteral("鼠标在窗口上才显示，离开后透明"));
+    m_ghostMouse->setToolTip(QStringLiteral("鼠标在主窗口上才显示，离开后透明"));
     m_ghostEnhancedButton->setToolTip(QStringLiteral("按住录入的键，并且鼠标在窗口上才显示"));
 
     m_ghostGroup = new QButtonGroup(m_ghostPopup);
@@ -722,6 +756,7 @@ void TitleBar::loadGhostSettings()
     m_ghostVirtualKey = settings.value(QStringLiteral("ghost/virtualKey"), 0).toInt();
     m_displayOpacity = qBound(1, settings.value(QStringLiteral("display/opacity"), 100).toInt(), 100);
     m_stayOnTop = settings.value(QStringLiteral("window/stayOnTop"), false).toBool();
+    m_titleHover = settings.value(QStringLiteral("ghost/titleHover"), false).toBool();
 }
 
 void TitleBar::saveGhostSettings() const
@@ -730,6 +765,18 @@ void TitleBar::saveGhostSettings() const
     settings.setValue(QStringLiteral("ghost/mode"), m_ghostOption);
     settings.setValue(QStringLiteral("ghost/modifiers"), m_ghostModifiers);
     settings.setValue(QStringLiteral("ghost/virtualKey"), m_ghostVirtualKey);
+}
+
+void TitleBar::setTitleHoverEnabled(bool on)
+{
+    if (m_titleHover == on)
+        return;
+    m_titleHover = on;
+    QSettings settings;
+    settings.setValue(QStringLiteral("ghost/titleHover"), m_titleHover);
+    updateTooltip(m_hover);
+    update();
+    emit titleHoverChanged(m_titleHover);
 }
 
 void TitleBar::emitGhostSettings()

@@ -24,6 +24,8 @@ public:
     bool ghostEnhanced() const;
     int ghostModifiers() const;
     int ghostVirtualKey() const;
+    bool titleHover() const;
+    bool chromePopupVisible() const;
     int displayOpacity() const;
     bool addressBarVisible() const;
     void resetToDefaults();
@@ -31,6 +33,7 @@ public:
 signals:
     void stayOnTopChanged(bool on);
     void ghostSettingsChanged(bool enabled, bool enhanced, int modifiers, int virtualKey);
+    void titleHoverChanged(bool enabled);
     void displayOpacityChanged(int percent);
     void addressBarVisibleChanged(bool visible);
 
@@ -51,12 +54,13 @@ private:
         Opacity,
         Pin,
         Ghost,
+        TitleHover,
         Minimize,
         Maximize,
         Close
     };
 
-    static const int kButtonCount = 7;
+    static const int kButtonCount = 8;
     static const Button kButtonOrder[kButtonCount];
 
     Button hitTest(const QPoint &pos) const;
@@ -80,6 +84,7 @@ private:
     void emitGhostSettings();
     void updateGhostKeyLabel();
     void updateGhostTooltip();
+    void setTitleHoverEnabled(bool on);
 
     QPixmap m_appIcon;
     QPixmap m_pinIcon;
@@ -102,6 +107,7 @@ private:
     bool m_dragging = false;
     bool m_stayOnTop = false;
     int m_ghostOption = 0;
+    bool m_titleHover = false;
     int m_ghostModifiers = 0;
     int m_ghostVirtualKey = 0;
     bool m_recording = false;

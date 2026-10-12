@@ -345,6 +345,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    rememberLocalReading();
     removeSwitcherHook();
 }
 
@@ -817,6 +818,40 @@ void MainWindow::loadBookmarks()
         if (m_bookmarks[i].target.isEmpty())
             m_bookmarks[i].kind = 0;
     }
+}
+
+void MainWindow::rememberLocalReading()
+{
+    // 点 X 会先 hide 窗口，此时 isVisible() 已是 false，不能用它判断是否在读 txt
+    if (m_currentLocalPath.isEmpty() || !m_reader)
+        return;
+    const int line = qMax(1, m_reader->cursorForPosition(QPoint(8, 8)).blockNumber() + 1);
+    const QString path = QFileInfo(m_currentLocalPath).absoluteFilePath();
+    int emptySlot = -1;
+    bool matched = false;
+    for (int i = 0; i < 10; ++i) {
+        if (m_bookmarks[i].kind == 0 || m_bookmarks[i].target.isEmpty()) {
+            if (emptySlot < 0)
+                emptySlot = i;
+            continue;
+        }
+        if (m_bookmarks[i].kind != 2)
+            continue;
+        if (QFileInfo(m_bookmarks[i].target).absoluteFilePath().compare(path, Qt::CaseInsensitive) != 0)
+            continue;
+        m_bookmarks[i].target = path;
+        m_bookmarks[i].position = line;
+        matched = true;
+    }
+    if (!matched) {
+        if (emptySlot < 0)
+            return;
+        m_bookmarks[emptySlot].kind = 2;
+        m_bookmarks[emptySlot].target = path;
+        m_bookmarks[emptySlot].title.clear();
+        m_bookmarks[emptySlot].position = line;
+    }
+    saveBookmarks();
 }
 
 void MainWindow::saveBookmarks()

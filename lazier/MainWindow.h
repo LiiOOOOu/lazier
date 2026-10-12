@@ -64,6 +64,7 @@ private:
     void clickWebAt(const QPoint &pos);
     void loadBookmarks();
     void saveBookmarks();
+    void rememberLocalReading();
     void showReadingSurface(bool local);
     void refreshBookmarkPopup();
     QString bookmarkLabel(int index) const;

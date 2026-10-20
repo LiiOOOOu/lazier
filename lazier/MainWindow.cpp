@@ -7,6 +7,7 @@
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QMimeData>
+#include <QtCore/QRegularExpression>
 #include <QtCore/QSettings>
 #include <QtCore/QTextCodec>
 #include <QtCore/QTimer>
@@ -35,6 +36,7 @@
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
+#include <QtWidgets/QListWidget>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
@@ -220,9 +222,8 @@ MainWindow::MainWindow(QWidget *parent)
         "QPushButton#navButton:hover { background: #E5E5E5; }"
         "QPushButton#navButton:pressed { background: #D5D5D5; }"
         "QPushButton#navButton:disabled { color: #BBBBBB; }"
-        "QComboBox#sourceCombo { background: #FFFFFF; border: 1px solid #D0D0D0; padding: 0 2px; min-height: 24px; }"
         "QLineEdit { min-height: 24px; }"
-        "QPushButton#goButton, QPushButton#bookmarkButton { padding: 0 4px; min-height: 24px; }"));
+        "QPushButton#goButton, QPushButton#bookmarkButton, QPushButton#chapterButton { padding: 0 4px; min-height: 24px; }"));
     m_backButton = new QPushButton(QStringLiteral("<"), m_addressBar);
     m_backButton->setObjectName(QStringLiteral("navButton"));
     m_backButton->setFixedSize(26, 26);
@@ -251,6 +252,11 @@ MainWindow::MainWindow(QWidget *parent)
     bookmarkButton->setObjectName(QStringLiteral("bookmarkButton"));
     bookmarkButton->setFixedSize(40, 26);
     bookmarkButton->setToolTip(QStringLiteral("点开后，点某一条右侧的「记下」保存当前位置"));
+    m_chapterButton = new QPushButton(QStringLiteral("章节"), m_addressBar);
+    m_chapterButton->setObjectName(QStringLiteral("chapterButton"));
+    m_chapterButton->setFixedSize(40, 26);
+    m_chapterButton->setEnabled(false);
+    m_chapterButton->setToolTip(QStringLiteral("本地 txt 的章节目录"));
     QHBoxLayout *addressLayout = new QHBoxLayout(m_addressBar);
     addressLayout->setContentsMargins(6, 4, 8, 4);
     addressLayout->setSpacing(2);
@@ -260,6 +266,7 @@ MainWindow::MainWindow(QWidget *parent)
     addressLayout->addWidget(m_urlEdit, 1);
     addressLayout->addWidget(goButton);
     addressLayout->addWidget(bookmarkButton);
+    addressLayout->addWidget(m_chapterButton);
 
     m_web = new QWebEngineView(m_frame);
     m_web->setUrl(QUrl(QStringLiteral("about:blank")));
@@ -288,6 +295,8 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
         m_currentLocalPath.clear();
+        m_chapters.clear();
+        hideReadingPopups();
         showReadingSurface(false);
         QString text = m_urlEdit->text().trimmed();
         if (text.isEmpty()) {
@@ -301,6 +310,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_urlEdit, &QLineEdit::returnPressed, this, navigate);
     connect(goButton, &QPushButton::clicked, this, navigate);
     connect(bookmarkButton, &QPushButton::clicked, this, &MainWindow::showBookmarkPopup);
+    connect(m_chapterButton, &QPushButton::clicked, this, &MainWindow::showChapterPopup);
     connect(m_sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         m_urlEdit->setPlaceholderText(index == 1
             ? QStringLiteral("输入路径，或把 txt 拖进窗口")
@@ -581,9 +591,7 @@ void MainWindow::setDisplayOpacity(int percent)
 
 void MainWindow::updateGhostVisual()
 {
-    const bool overBookmark = m_bookmarkPopup && m_bookmarkPopup->isVisible()
-        && m_bookmarkPopup->geometry().contains(QCursor::pos());
-    const bool inside = isCursorInside() || overBookmark;
+    const bool inside = isCursorInside() || cursorOverReadingPopup();
     const bool hotkeyMode = m_ghostEnhanced && (m_ghostModifiers != 0 || m_ghostVirtualKey != 0);
     if (m_ghostMode && !m_ghostArmed && isVisible()) {
         if (!m_ghostWatchingEnter) {
@@ -611,8 +619,8 @@ void MainWindow::updateGhostVisual()
 #endif
         }
     }
-    if (!showContent && m_bookmarkPopup && m_bookmarkPopup->isVisible())
-        m_bookmarkPopup->hide();
+    if (!showContent)
+        hideReadingPopups();
     if (!showContent) {
         if (m_web && m_web->isVisible()) {
             m_webHiddenForReveal = true;
@@ -829,8 +837,7 @@ bool MainWindow::prepareRevealMouseInput()
         return false;
     if (isCursorInside())
         return true;
-    return m_bookmarkPopup && m_bookmarkPopup->isVisible()
-        && m_bookmarkPopup->geometry().contains(QCursor::pos());
+    return cursorOverReadingPopup();
 }
 
 void MainWindow::clickWebAt(const QPoint &pos)
@@ -868,6 +875,19 @@ void MainWindow::updateHistoryButtons()
         m_backButton->setEnabled(!local && history && history->canGoBack());
     if (m_forwardButton)
         m_forwardButton->setEnabled(!local && history && history->canGoForward());
+    if (m_chapterButton) {
+        const bool ready = local && !m_chapters.isEmpty();
+        m_chapterButton->setVisible(local);
+        m_chapterButton->setEnabled(ready);
+        if (!local)
+            m_chapterButton->setToolTip(QStringLiteral("本地 txt 的章节目录"));
+        else if (m_currentLocalPath.isEmpty())
+            m_chapterButton->setToolTip(QStringLiteral("请先打开 txt"));
+        else if (!ready)
+            m_chapterButton->setToolTip(QStringLiteral("没有识别到章节"));
+        else
+            m_chapterButton->setToolTip(QStringLiteral("章节目录"));
+    }
 }
 
 void MainWindow::showReadingSurface(bool local)
@@ -891,6 +911,8 @@ void MainWindow::openDroppedText(const QString &path)
 void MainWindow::openLocalText(const QString &pathText, int line)
 {
     m_pendingWebScroll = -1;
+    m_chapters.clear();
+    hideReadingPopups();
     QString path = pathText.trimmed();
     if (path.size() >= 2 && path.startsWith(QLatin1Char('"')) && path.endsWith(QLatin1Char('"')))
         path = path.mid(1, path.size() - 2).trimmed();
@@ -900,6 +922,7 @@ void MainWindow::openLocalText(const QString &pathText, int line)
     const auto showMessage = [this](const QString &message) {
         m_currentLocalPath.clear();
         m_pendingLocalLine = 0;
+        m_chapters.clear();
         showReadingSurface(true);
         m_reader->setPlainText(message);
     };
@@ -929,6 +952,8 @@ void MainWindow::openLocalText(const QString &pathText, int line)
     m_reader->setPlainText(text);
     m_currentLocalPath = info.absoluteFilePath();
     m_pendingLocalLine = 0;
+    rebuildLocalChapters();
+    updateHistoryButtons();
     const int blockNumber = qBound(0, line - 1, qMax(0, m_reader->blockCount() - 1));
     QTextCursor cursor(m_reader->document()->findBlockByNumber(blockNumber));
     m_reader->setTextCursor(cursor);
@@ -947,11 +972,143 @@ void MainWindow::jumpToLocalLine()
                                            current, 1, count, 1, &ok);
     if (!ok)
         return;
+    jumpToLocalLineNumber(line);
+}
+
+void MainWindow::jumpToLocalLineNumber(int line)
+{
+    if (!m_reader || m_currentLocalPath.isEmpty())
+        return;
+    const int count = qMax(1, m_reader->blockCount());
     const int blockNumber = qBound(0, line - 1, count - 1);
     QTextCursor cursor(m_reader->document()->findBlockByNumber(blockNumber));
     m_reader->setTextCursor(cursor);
     m_reader->ensureCursorVisible();
     m_reader->setFocus();
+}
+
+void MainWindow::rebuildLocalChapters()
+{
+    m_chapters.clear();
+    if (!m_reader || !m_reader->document())
+        return;
+    // 只收整行标题。章名紧贴正文（如「第一章他走了」）不是目录，避免把叙述扫进去。
+    static const QRegularExpression marked(QStringLiteral("#CH\\s*(.+?)\\s*#CH"));
+    static const QRegularExpression plain(QStringLiteral(
+        "^第(?:[0-9０-９]{1,6}|[零〇一二三四五六七八九十百千万两]{1,16})章"
+        "(?:[ \\t　]+.+|[：:].+)?$"));
+    for (QTextBlock block = m_reader->document()->begin(); block.isValid(); block = block.next()) {
+        const QString trimmed = block.text().trimmed();
+        if (trimmed.isEmpty() || trimmed.size() > 120)
+            continue;
+        const int line = block.blockNumber() + 1;
+        if (trimmed.contains(QStringLiteral("#CH"))) {
+            const QString residue = QString(trimmed).remove(marked).trimmed();
+            if (!residue.isEmpty())
+                continue;
+            QRegularExpressionMatchIterator matches = marked.globalMatch(trimmed);
+            while (matches.hasNext()) {
+                const QString title = matches.next().captured(1).trimmed();
+                if (title.isEmpty())
+                    continue;
+                LocalChapter chapter;
+                chapter.title = title;
+                chapter.line = line;
+                m_chapters.append(chapter);
+            }
+            continue;
+        }
+        if (!plain.match(trimmed).hasMatch())
+            continue;
+        LocalChapter chapter;
+        chapter.title = trimmed;
+        chapter.line = line;
+        m_chapters.append(chapter);
+    }
+}
+
+bool MainWindow::cursorOverReadingPopup() const
+{
+    const auto covers = [](const QWidget *popup) {
+        return popup && popup->isVisible() && popup->geometry().contains(QCursor::pos());
+    };
+    return covers(m_bookmarkPopup) || covers(m_chapterPopup);
+}
+
+void MainWindow::hideReadingPopups()
+{
+    if (m_bookmarkPopup && m_bookmarkPopup->isVisible())
+        m_bookmarkPopup->hide();
+    if (m_chapterPopup && m_chapterPopup->isVisible())
+        m_chapterPopup->hide();
+}
+
+void MainWindow::createChapterPopup()
+{
+    m_chapterPopup = new QWidget(window(), Qt::Popup | Qt::FramelessWindowHint);
+    m_chapterPopup->setObjectName(QStringLiteral("chapterPopup"));
+    m_chapterPopup->setFixedSize(360, 360);
+    // 选择器不能写成 QWidget，否则会命中 QScrollBar，Qt 改用经典滚动条
+    m_chapterPopup->setStyleSheet(QStringLiteral(
+        "#chapterPopup { background: #FFFFFF; border: 1px solid #D0D0D0; }"
+        "QLabel { color: #666666; background: transparent; border: none; }"
+        "QListWidget::item { padding: 4px 8px; }"
+        "QListWidget::item:selected { background: #E8E8E8; color: #222222; }"
+        "QListWidget::item:hover { background: #F3F3F3; }"));
+
+    QVBoxLayout *layout = new QVBoxLayout(m_chapterPopup);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(2);
+    layout->addWidget(new QLabel(QStringLiteral("点章节名跳到该行"), m_chapterPopup));
+    m_chapterList = new QListWidget(m_chapterPopup);
+    m_chapterList->setFrameShape(QFrame::NoFrame);
+    QPalette listPalette = m_chapterList->palette();
+    listPalette.setColor(QPalette::Base, QColor(0xFFFFFF));
+    listPalette.setColor(QPalette::Text, QColor(0x222222));
+    listPalette.setColor(QPalette::Highlight, QColor(0xE8E8E8));
+    listPalette.setColor(QPalette::HighlightedText, QColor(0x222222));
+    m_chapterList->setPalette(listPalette);
+    m_chapterList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_chapterList->setTextElideMode(Qt::ElideRight);
+    m_chapterList->setUniformItemSizes(true);
+    layout->addWidget(m_chapterList, 1);
+    connect(m_chapterList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        if (!item)
+            return;
+        const int line = item->data(Qt::UserRole).toInt();
+        m_chapterPopup->hide();
+        jumpToLocalLineNumber(line);
+    });
+}
+
+void MainWindow::showChapterPopup()
+{
+    if (m_chapters.isEmpty() || !m_reader || !m_reader->isVisible())
+        return;
+    if (!m_chapterPopup)
+        createChapterPopup();
+    if (m_bookmarkPopup)
+        m_bookmarkPopup->hide();
+    m_chapterList->clear();
+    const int readingLine = m_reader->cursorForPosition(QPoint(8, 8)).blockNumber() + 1;
+    int currentRow = 0;
+    for (int i = 0; i < m_chapters.size(); ++i) {
+        const LocalChapter &chapter = m_chapters.at(i);
+        QListWidgetItem *item = new QListWidgetItem(chapter.title, m_chapterList);
+        item->setData(Qt::UserRole, chapter.line);
+        item->setToolTip(QStringLiteral("第 %1 行").arg(chapter.line));
+        if (chapter.line <= readingLine)
+            currentRow = i;
+    }
+    m_chapterList->setCurrentRow(currentRow);
+    if (QListWidgetItem *current = m_chapterList->currentItem())
+        m_chapterList->scrollToItem(current, QAbstractItemView::PositionAtCenter);
+    QPoint pos = m_addressBar->mapToGlobal(
+        QPoint(m_addressBar->width() - m_chapterPopup->width(), m_addressBar->height()));
+    if (pos.x() < 0)
+        pos.setX(0);
+    m_chapterPopup->move(pos);
+    m_chapterPopup->show();
 }
 
 void MainWindow::loadBookmarks()
@@ -1098,6 +1255,8 @@ void MainWindow::showBookmarkPopup()
 {
     if (!m_bookmarkPopup)
         createBookmarkPopup();
+    if (m_chapterPopup)
+        m_chapterPopup->hide();
     refreshBookmarkPopup();
     QPoint pos = m_addressBar->mapToGlobal(QPoint(m_addressBar->width() - m_bookmarkPopup->width(), m_addressBar->height()));
     if (pos.x() < 0)
@@ -1173,6 +1332,7 @@ void MainWindow::openBookmark(int index)
     }
     m_currentLocalPath.clear();
     m_pendingLocalLine = 0;
+    m_chapters.clear();
     m_pendingWebScroll = qMax(0, mark.position);
     showReadingSurface(false);
     if (m_sourceCombo)

@@ -1,10 +1,12 @@
 #pragma once
 
+#include <QtCore/QVector>
 #include <QtCore/Qt>
 #include <QtWidgets/QMainWindow>
 
 class QComboBox;
 class QLineEdit;
+class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QSystemTrayIcon;
@@ -53,6 +55,7 @@ private slots:
     void showBookmarkPopup();
     void saveBookmark(int index);
     void openBookmark(int index);
+    void showChapterPopup();
 
 private:
     enum { BorderWidth = 6 };
@@ -76,12 +79,22 @@ private:
     void refreshBookmarkPopup();
     QString bookmarkLabel(int index) const;
     void createBookmarkPopup();
+    void rebuildLocalChapters();
+    void createChapterPopup();
+    void jumpToLocalLineNumber(int line);
+    bool cursorOverReadingPopup() const;
+    void hideReadingPopups();
 
     struct ReadingBookmark {
         int kind = 0;
         QString target;
         QString title;
         int position = 0;
+    };
+
+    struct LocalChapter {
+        QString title;
+        int line = 1;
     };
 
     TitleBar *m_titleBar = nullptr;
@@ -96,6 +109,10 @@ private:
     QWidget *m_bookmarkPopup = nullptr;
     QPushButton *m_bookmarkButtons[10] = {};
     ReadingBookmark m_bookmarks[10];
+    QPushButton *m_chapterButton = nullptr;
+    QWidget *m_chapterPopup = nullptr;
+    QListWidget *m_chapterList = nullptr;
+    QVector<LocalChapter> m_chapters;
     QString m_currentLocalPath;
     int m_pendingLocalLine = 0;
     int m_pendingWebScroll = -1;

@@ -7,6 +7,7 @@
 class QComboBox;
 class QLineEdit;
 class QListWidget;
+class QMoveEvent;
 class QPlainTextEdit;
 class QPushButton;
 class QSystemTrayIcon;
@@ -33,6 +34,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void changeEvent(QEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void moveEvent(QMoveEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
 private slots:
@@ -62,6 +64,7 @@ private:
 
     Qt::Edges edgeAt(const QPoint &pos) const;
     void updateFrame();
+    void syncTitleGeometry();
     bool isCursorInside() const;
     bool isCursorOverTitleBar() const;
     void applyRevealMask(bool showTitle, bool showContent);
@@ -98,6 +101,7 @@ private:
     };
 
     TitleBar *m_titleBar = nullptr;
+    QWidget *m_titleGap = nullptr;
     QWebEngineView *m_web = nullptr;
     QPlainTextEdit *m_reader = nullptr;
     QWidget *m_frame = nullptr;

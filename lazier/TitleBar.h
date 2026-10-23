@@ -6,8 +6,10 @@
 
 class QButtonGroup;
 class QLabel;
+class QPainter;
 class QPushButton;
 class QRadioButton;
+class QResizeEvent;
 class QSlider;
 class QTimer;
 
@@ -29,6 +31,8 @@ public:
     int displayOpacity() const;
     bool addressBarVisible() const;
     void resetToDefaults();
+    void setHostStaysOnTop(bool on);
+    void setChromeMaximized(bool maximized);
 
 signals:
     void stayOnTopChanged(bool on);
@@ -46,6 +50,8 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    bool nativeEvent(const QByteArray &eventType, void *message, long *result) override;
 
 private:
     enum Button {
@@ -63,9 +69,15 @@ private:
     static const int kButtonCount = 8;
     static const Button kButtonOrder[kButtonCount];
 
+    QWidget *hostWindow() const;
     Button hitTest(const QPoint &pos) const;
     QRect buttonRect(Button button) const;
     void setHover(Button button);
+    void rebuildCanvas();
+    void paintChrome(QPainter &painter) const;
+    void paintButton(QPainter &painter, Button button) const;
+    void patchButton(Button button);
+    void updateCornerMask();
     void toggleMaximize();
     void updateTooltip(Button button);
     bool isToggled(Button button) const;
@@ -86,6 +98,8 @@ private:
     void updateGhostTooltip();
     void setTitleHoverEnabled(bool on);
 
+    QPixmap m_canvas;
+    bool m_chromeMaximized = false;
     QPixmap m_appIcon;
     QPixmap m_pinIcon;
     QPixmap m_pinIconTilted;

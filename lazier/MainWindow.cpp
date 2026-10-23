@@ -23,6 +23,7 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QMoveEvent>
 #include <QtGui/QTextBlock>
 #include <QtGui/QTextCursor>
 #include <QtGui/QTextOption>
@@ -206,7 +207,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_frame->setObjectName(QStringLiteral("windowFrame"));
     m_frame->setStyleSheet(QStringLiteral("#windowFrame { background: #FFFFFF; }"));
 
-    m_titleBar = new TitleBar(m_frame);
+    m_titleBar = new TitleBar(this);
+    m_titleGap = new QWidget(m_frame);
+    m_titleGap->setFixedHeight(m_titleBar->sizeHint().height());
     connect(m_titleBar, &TitleBar::stayOnTopChanged, this, &MainWindow::setStayOnTop);
     connect(m_titleBar, &TitleBar::ghostSettingsChanged, this, &MainWindow::setGhostSettings);
     connect(m_titleBar, &TitleBar::titleHoverChanged, this, &MainWindow::setTitleHover);
@@ -244,7 +247,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_urlEdit = new QLineEdit(m_addressBar);
     m_urlEdit->setPlaceholderText(QStringLiteral("输入网址后回车"));
     m_urlEdit->setFixedHeight(26);
-    m_urlEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    // 行编辑默认最小宽度会把最右侧的「章节」挤出 400 宽的地址栏。
+    QSizePolicy urlPolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    urlPolicy.setHorizontalStretch(1);
+    m_urlEdit->setSizePolicy(urlPolicy);
+    m_urlEdit->setMinimumWidth(48);
     QPushButton *goButton = new QPushButton(QStringLiteral("前往"), m_addressBar);
     goButton->setObjectName(QStringLiteral("goButton"));
     goButton->setFixedSize(40, 26);
@@ -315,6 +322,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_urlEdit->setPlaceholderText(index == 1
             ? QStringLiteral("输入路径，或把 txt 拖进窗口")
             : QStringLiteral("输入网址后回车"));
+        updateHistoryButtons();
     });
     connect(m_backButton, &QPushButton::clicked, m_web, &QWebEngineView::back);
     connect(m_forwardButton, &QPushButton::clicked, m_web, &QWebEngineView::forward);
@@ -361,13 +369,16 @@ MainWindow::MainWindow(QWidget *parent)
 
     QVBoxLayout *layout = new QVBoxLayout(m_frame);
     layout->setSpacing(0);
-    layout->addWidget(m_titleBar);
+    layout->addWidget(m_titleGap);
     layout->addWidget(m_addressBar);
     layout->addWidget(m_web, 1);
     layout->addWidget(m_reader, 1);
     setCentralWidget(m_frame);
-    m_titleBar->raise();
     updateFrame();
+    m_chapterButton->setVisible(true);
+    addressLayout->activate();
+    setMinimumWidth(qMax(minimumWidth(), m_addressBar->minimumSizeHint().width()));
+    m_chapterButton->setVisible(false);
 
     m_ghostTimer = new QTimer(this);
     m_ghostTimer->setInterval(50);
@@ -511,8 +522,7 @@ void MainWindow::changeEvent(QEvent *event)
     QMainWindow::changeEvent(event);
     if (event->type() == QEvent::WindowStateChange) {
         updateFrame();
-        if (m_titleBar)
-            m_titleBar->update();
+        syncTitleGeometry();
         updateGhostVisual();
     }
 }
@@ -526,13 +536,20 @@ void MainWindow::showEvent(QShowEvent *event)
     }
     hideFromTaskbar();
     m_revealSize = QSize();
-    applyRevealMask(m_revealTitle, m_revealContent);
+    updateGhostVisual();
+}
+
+void MainWindow::moveEvent(QMoveEvent *event)
+{
+    QMainWindow::moveEvent(event);
+    syncTitleGeometry();
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
     applyRevealMask(m_revealTitle, m_revealContent);
+    syncTitleGeometry();
 }
 
 void MainWindow::setStayOnTop(bool on)
@@ -550,6 +567,8 @@ void MainWindow::setStayOnTop(bool on)
         show();
         hideFromTaskbar();
     }
+    if (m_titleBar)
+        m_titleBar->setHostStaysOnTop(on);
     updateGhostVisual();
 }
 
@@ -626,17 +645,39 @@ void MainWindow::updateGhostVisual()
             m_webHiddenForReveal = true;
             m_web->hide();
         }
-        if (m_titleBar)
-            m_titleBar->raise();
     } else if (m_webHiddenForReveal) {
         m_webHiddenForReveal = false;
         if (m_web && !(m_reader && m_reader->isVisible()))
             m_web->show();
     }
-    const bool showTitle = !m_titleHover || isCursorOverTitleBar()
-        || (m_titleBar && m_titleBar->chromePopupVisible());
+    bool showTitle = !m_titleHover || isCursorOverTitleBar();
+    if (m_titleBar && m_titleBar->chromePopupVisible())
+        showTitle = true;
+    else if (m_titleHover && m_ghostMode && m_ghostArmed) {
+        if (hotkeyMode) {
+#ifdef Q_OS_WIN
+            showTitle = inside && ghostHotkeyHeld(m_ghostModifiers, m_ghostVirtualKey);
+#else
+            showTitle = inside;
+#endif
+        } else {
+            showTitle = inside;
+        }
+    }
+    if (!isVisible() || isMinimized())
+        showTitle = false;
+    syncTitleGeometry();
+    if (m_titleBar) {
+        if (showTitle) {
+            m_titleBar->setWindowOpacity(m_displayOpacity / 100.0);
+            if (!m_titleBar->isVisible())
+                m_titleBar->show();
+        } else if (m_titleBar->isVisible()) {
+            m_titleBar->hide();
+        }
+    }
     applyRevealMask(showTitle, showContent);
-    setWindowOpacity((showTitle || showContent) ? m_displayOpacity / 100.0 : 0.0);
+    setWindowOpacity(showContent ? m_displayOpacity / 100.0 : 0.0);
 }
 
 void MainWindow::minimizeForSwitcher()
@@ -678,16 +719,33 @@ void MainWindow::restoreFromTray()
 
 bool MainWindow::isCursorInside() const
 {
-    return frameGeometry().contains(QCursor::pos());
+    const QPoint cursor = QCursor::pos();
+    if (frameGeometry().contains(cursor))
+        return true;
+    return m_titleBar && m_titleBar->isVisible() && m_titleBar->frameGeometry().contains(cursor);
 }
 
 bool MainWindow::isCursorOverTitleBar() const
 {
-    if (!m_titleBar || !isVisible() || isMinimized())
+    if (!m_titleGap || !isVisible() || isMinimized())
         return false;
-    const QPoint origin = mapToGlobal(QPoint(0, 0));
-    const int split = m_titleBar->mapTo(this, QPoint(0, m_titleBar->height())).y();
-    return QRect(origin, QSize(width(), qMax(1, split))).contains(QCursor::pos());
+    const QPoint cursor = QCursor::pos();
+    const QRect gap(m_titleGap->mapToGlobal(QPoint(0, 0)), m_titleGap->size());
+    if (gap.contains(cursor))
+        return true;
+    return m_titleBar && m_titleBar->isVisible() && m_titleBar->frameGeometry().contains(cursor);
+}
+
+void MainWindow::syncTitleGeometry()
+{
+    if (!m_titleBar || !m_titleGap)
+        return;
+    if (m_titleGap->width() < 2 || m_titleGap->height() < 2)
+        return;
+    const QRect rect(m_titleGap->mapToGlobal(QPoint(0, 0)), m_titleGap->size());
+    if (m_titleBar->geometry() != rect)
+        m_titleBar->setGeometry(rect);
+    m_titleBar->setChromeMaximized(isMaximized());
 }
 
 void MainWindow::applyRevealMask(bool showTitle, bool showContent)
@@ -704,32 +762,20 @@ void MainWindow::applyRevealMask(bool showTitle, bool showContent)
     updateFrame();
     if (m_frame && m_frame->layout())
         m_frame->layout()->activate();
-    if ((!showTitle && !showContent) || size.width() < 2 || size.height() < 2) {
+    if (!showContent || size.width() < 2 || size.height() < 2) {
         clearMask();
         return;
     }
     // Win11 普通窗口圆角是 8 逻辑像素，最大化贴边时系统用直角
     const int radius = zoomed ? 0 : 8;
-    if (showTitle && showContent) {
+    if (showTitle || !m_titleGap) {
         if (radius == 0)
             clearMask();
         else
             setMask(roundedRegion(QRect(0, 0, size.width(), size.height()), radius, true, true));
         return;
     }
-    if (!m_titleBar)
-        return;
-    const QRect titleRect(m_titleBar->mapTo(this, QPoint(0, 0)), m_titleBar->size());
-    if (showTitle) {
-        // 只留标题栏本身，暗色外边框留在区域外，避免藏主窗口时变成黑条
-        if (radius == 0)
-            setMask(QRegion(titleRect));
-        else
-            setMask(roundedRegion(titleRect, radius, true, false));
-        m_titleBar->raise();
-        m_titleBar->update();
-        return;
-    }
+    const QRect titleRect(m_titleGap->mapTo(this, QPoint(0, 0)), m_titleGap->size());
     const QRect contentRect(0, titleRect.bottom() + 1, width(), qMax(0, height() - titleRect.bottom() - 1));
     setMask(roundedRegion(contentRect, radius, true, true));
 }
@@ -869,19 +915,20 @@ void MainWindow::setAddressBarVisible(bool visible)
 
 void MainWindow::updateHistoryButtons()
 {
-    const bool local = m_reader && m_reader->isVisible();
+    const bool readingLocal = m_reader && m_reader->isVisible();
+    const bool showChapter = readingLocal || (m_sourceCombo && m_sourceCombo->currentIndex() == 1);
     QWebEngineHistory *history = m_web ? m_web->history() : nullptr;
     if (m_backButton)
-        m_backButton->setEnabled(!local && history && history->canGoBack());
+        m_backButton->setEnabled(!readingLocal && history && history->canGoBack());
     if (m_forwardButton)
-        m_forwardButton->setEnabled(!local && history && history->canGoForward());
+        m_forwardButton->setEnabled(!readingLocal && history && history->canGoForward());
     if (m_chapterButton) {
-        const bool ready = local && !m_chapters.isEmpty();
-        m_chapterButton->setVisible(local);
+        const bool ready = readingLocal && !m_chapters.isEmpty();
+        m_chapterButton->setVisible(showChapter);
         m_chapterButton->setEnabled(ready);
-        if (!local)
+        if (!showChapter)
             m_chapterButton->setToolTip(QStringLiteral("本地 txt 的章节目录"));
-        else if (m_currentLocalPath.isEmpty())
+        else if (!readingLocal || m_currentLocalPath.isEmpty())
             m_chapterButton->setToolTip(QStringLiteral("请先打开 txt"));
         else if (!ready)
             m_chapterButton->setToolTip(QStringLiteral("没有识别到章节"));

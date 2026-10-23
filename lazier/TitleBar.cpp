@@ -8,6 +8,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QResizeEvent>
 #include <QtGui/QPalette>
 #include <QtGui/QPixmap>
 #include <QtGui/QWheelEvent>
@@ -22,6 +23,7 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <windowsx.h>
 #endif
 
 namespace {
@@ -147,12 +149,12 @@ const TitleBar::Button TitleBar::kButtonOrder[TitleBar::kButtonCount] = {
 };
 
 TitleBar::TitleBar(QWidget *parent)
-    : QWidget(parent)
+    : QWidget(parent, Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint | Qt::WindowDoesNotAcceptFocus)
 {
     setFixedHeight(kHeight);
     setMouseTracking(true);
     setAttribute(Qt::WA_Hover);
-    setAttribute(Qt::WA_NativeWindow);
+    setAttribute(Qt::WA_ShowWithoutActivating);
     setAttribute(Qt::WA_OpaquePaintEvent);
     setAutoFillBackground(true);
     QPalette pal = palette();
@@ -169,6 +171,12 @@ TitleBar::TitleBar(QWidget *parent)
 QSize TitleBar::sizeHint() const
 {
     return QSize(200, kHeight);
+}
+
+QWidget *TitleBar::hostWindow() const
+{
+    QWidget *parent = parentWidget();
+    return parent ? parent->window() : nullptr;
 }
 
 bool TitleBar::stayOnTop() const
@@ -233,7 +241,7 @@ void TitleBar::resetToDefaults()
         m_addressBarVisible = true;
         emit addressBarVisibleChanged(true);
     }
-    update();
+    rebuildCanvas();
 }
 
 TitleBar::Button TitleBar::hitTest(const QPoint &pos) const
@@ -260,9 +268,15 @@ void TitleBar::setHover(Button button)
 {
     if (m_hover == button)
         return;
+    const Button previous = m_hover;
     m_hover = button;
     updateTooltip(button);
-    update();
+    if (m_canvas.size() != size()) {
+        rebuildCanvas();
+        return;
+    }
+    patchButton(previous);
+    patchButton(button);
 }
 
 void TitleBar::updateTooltip(Button button)
@@ -280,10 +294,18 @@ void TitleBar::updateTooltip(Button button)
         else
             setToolTip(QStringLiteral("主窗口透明设置"));
     }
-    else if (button == TitleHover)
-        setToolTip(m_titleHover
-            ? QStringLiteral("鼠标在标题栏上才显示")
-            : QStringLiteral("标题栏始终显示"));
+    else if (button == TitleHover) {
+        const bool hotkey = m_ghostOption == 2
+            && (m_ghostModifiers != 0 || m_ghostVirtualKey != 0);
+        if (!m_titleHover)
+            setToolTip(QStringLiteral("标题栏始终显示"));
+        else if (hotkey)
+            setToolTip(QStringLiteral("按住辅助键，并且鼠标在窗口上才显示标题栏"));
+        else if (m_ghostOption == 1)
+            setToolTip(QStringLiteral("鼠标在窗口上才显示标题栏"));
+        else
+            setToolTip(QStringLiteral("鼠标在标题栏上才显示"));
+    }
     else if (button == Opacity)
         setToolTip(QStringLiteral("正常显示透明度: %1").arg(m_displayOpacity));
     else if (button == ToggleAddress)
@@ -303,14 +325,14 @@ bool TitleBar::isToggled(Button button) const
 
 void TitleBar::toggleMaximize()
 {
-    QWidget *win = window();
+    QWidget *win = hostWindow();
     if (!win)
         return;
     if (win->isMaximized())
         win->showNormal();
     else
         win->showMaximized();
-    update();
+    rebuildCanvas();
 }
 
 void TitleBar::drawButtonIcon(QPainter &painter, const QRect &rc, const QPixmap &icon, bool dimmed) const
@@ -326,12 +348,21 @@ void TitleBar::drawButtonIcon(QPainter &painter, const QRect &rc, const QPixmap 
     painter.restore();
 }
 
-void TitleBar::paintEvent(QPaintEvent *)
+void TitleBar::rebuildCanvas()
 {
-    QPainter painter(this);
+    if (width() < 2 || height() < 2)
+        return;
+    m_canvas = QPixmap(size());
+    m_canvas.fill(Qt::white);
+    QPainter painter(&m_canvas);
+    paintChrome(painter);
+    update();
+}
+
+void TitleBar::paintChrome(QPainter &painter) const
+{
     painter.setRenderHint(QPainter::Antialiasing, true);
-    const QColor background(QStringLiteral("#FFFFFF"));
-    painter.fillRect(rect(), background);
+    painter.fillRect(rect(), Qt::white);
 
     const int appSize = 16;
     const QRect appRect(8, (height() - appSize) / 2, appSize, appSize);
@@ -346,75 +377,181 @@ void TitleBar::paintEvent(QPaintEvent *)
     painter.setFont(font);
     const int textLeft = appRect.right() + 8;
     const int textRight = buttonRect(ToggleAddress).left() - 8;
+    const QWidget *host = hostWindow();
     painter.drawText(QRect(textLeft, 0, qMax(0, textRight - textLeft), height()),
                      Qt::AlignVCenter | Qt::AlignLeft,
-                     window() ? window()->windowTitle() : QStringLiteral("lazier"));
+                     host ? host->windowTitle() : QStringLiteral("lazier"));
 
-    const bool maximized = window() && window()->isMaximized();
-    for (int i = 0; i < kButtonCount; ++i) {
-        const Button button = kButtonOrder[i];
-        const QRect rc = buttonRect(button);
-        const bool hovered = (m_hover == button || m_pressed == button);
-        const bool toggled = isToggled(button);
-        QColor back;
-        if (button == Close && hovered)
-            back = QColor(QStringLiteral("#C42B1C"));
-        else if (hovered)
-            back = QColor(QStringLiteral("#E5E5E5"));
-        else if (toggled)
-            back = QColor(QStringLiteral("#DCE8F5"));
-        if (back.isValid())
-            painter.fillRect(rc, back);
+    for (int i = 0; i < kButtonCount; ++i)
+        paintButton(painter, kButtonOrder[i]);
+}
 
-        const QColor iconColor = (button == Close && hovered)
-            ? QColor(QStringLiteral("#FFFFFF"))
-            : (toggled ? QColor(QStringLiteral("#1B6EC2")) : QColor(QStringLiteral("#333333")));
-        painter.setPen(QPen(iconColor, 1.0));
-        const QPoint c = rc.center();
-        const int half = kIcon / 2;
-        if (button == Pin) {
-            drawButtonIcon(painter, rc, toggled ? m_pinIconTilted : m_pinIcon, !toggled && !hovered);
-        } else if (button == Ghost) {
-            drawButtonIcon(painter, rc, m_ghostIcon, !toggled && !hovered);
-        } else if (button == TitleHover) {
-            painter.setBrush(Qt::NoBrush);
-            painter.drawRect(QRect(c.x() - half, c.y() - half, kIcon, kIcon));
-            painter.fillRect(QRect(c.x() - half + 1, c.y() - half + 1, kIcon - 2, 3), iconColor);
-        } else if (button == Opacity) {
-            drawButtonIcon(painter, rc, m_opacityIcon, !toggled && !hovered);
-        } else if (button == ToggleAddress) {
-            painter.setBrush(iconColor);
-            painter.setPen(Qt::NoPen);
-            const int half = 4;
-            QPoint points[3];
-            if (m_addressBarVisible) {
-                points[0] = QPoint(c.x() - half, c.y() - 2);
-                points[1] = QPoint(c.x() + half, c.y() - 2);
-                points[2] = QPoint(c.x(), c.y() + 3);
-            } else {
-                points[0] = QPoint(c.x() - half, c.y() + 2);
-                points[1] = QPoint(c.x() + half, c.y() + 2);
-                points[2] = QPoint(c.x(), c.y() - 3);
-            }
-            painter.drawPolygon(points, 3);
-            painter.setBrush(Qt::NoBrush);
-        } else if (button == Minimize) {
-            painter.drawLine(c.x() - half, c.y(), c.x() + half, c.y());
-        } else if (button == Maximize) {
-            if (maximized) {
-                const QRect backRect(c.x() - 2, c.y() - 4, 6, 6);
-                const QRect frontRect(c.x() - 4, c.y() - 2, 6, 6);
-                painter.drawRect(backRect);
-                painter.fillRect(frontRect, hovered ? back : background);
-                painter.drawRect(frontRect);
-            } else {
-                painter.drawRect(QRect(c.x() - half, c.y() - half, kIcon, kIcon));
-            }
+void TitleBar::paintButton(QPainter &painter, Button button) const
+{
+    const QRect rc = buttonRect(button);
+    if (rc.isEmpty())
+        return;
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor background(Qt::white);
+    painter.fillRect(rc, background);
+
+    const bool hovered = (m_hover == button || m_pressed == button);
+    const bool toggled = isToggled(button);
+    QColor back;
+    if (button == Close && hovered)
+        back = QColor(QStringLiteral("#C42B1C"));
+    else if (hovered)
+        back = QColor(QStringLiteral("#E5E5E5"));
+    else if (toggled)
+        back = QColor(QStringLiteral("#DCE8F5"));
+    if (back.isValid())
+        painter.fillRect(rc, back);
+
+    const QColor iconColor = (button == Close && hovered)
+        ? QColor(QStringLiteral("#FFFFFF"))
+        : (toggled ? QColor(QStringLiteral("#1B6EC2")) : QColor(QStringLiteral("#333333")));
+    painter.setPen(QPen(iconColor, 1.0));
+    const QPoint c = rc.center();
+    const int half = kIcon / 2;
+    const QWidget *host = hostWindow();
+    const bool maximized = host && host->isMaximized();
+    if (button == Pin) {
+        drawButtonIcon(painter, rc, toggled ? m_pinIconTilted : m_pinIcon, !toggled && !hovered);
+    } else if (button == Ghost) {
+        drawButtonIcon(painter, rc, m_ghostIcon, !toggled && !hovered);
+    } else if (button == TitleHover) {
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(QRect(c.x() - half, c.y() - half, kIcon, kIcon));
+        painter.fillRect(QRect(c.x() - half + 1, c.y() - half + 1, kIcon - 2, 3), iconColor);
+    } else if (button == Opacity) {
+        drawButtonIcon(painter, rc, m_opacityIcon, !toggled && !hovered);
+    } else if (button == ToggleAddress) {
+        painter.setBrush(iconColor);
+        painter.setPen(Qt::NoPen);
+        const int arrow = 4;
+        QPoint points[3];
+        if (m_addressBarVisible) {
+            points[0] = QPoint(c.x() - arrow, c.y() - 2);
+            points[1] = QPoint(c.x() + arrow, c.y() - 2);
+            points[2] = QPoint(c.x(), c.y() + 3);
         } else {
-            painter.drawLine(c.x() - half, c.y() - half, c.x() + half, c.y() + half);
-            painter.drawLine(c.x() + half, c.y() - half, c.x() - half, c.y() + half);
+            points[0] = QPoint(c.x() - arrow, c.y() + 2);
+            points[1] = QPoint(c.x() + arrow, c.y() + 2);
+            points[2] = QPoint(c.x(), c.y() - 3);
+        }
+        painter.drawPolygon(points, 3);
+        painter.setBrush(Qt::NoBrush);
+    } else if (button == Minimize) {
+        painter.drawLine(c.x() - half, c.y(), c.x() + half, c.y());
+    } else if (button == Maximize) {
+        if (maximized) {
+            const QRect backRect(c.x() - 2, c.y() - 4, 6, 6);
+            const QRect frontRect(c.x() - 4, c.y() - 2, 6, 6);
+            painter.drawRect(backRect);
+            painter.fillRect(frontRect, hovered ? back : background);
+            painter.drawRect(frontRect);
+        } else {
+            painter.drawRect(QRect(c.x() - half, c.y() - half, kIcon, kIcon));
+        }
+    } else {
+        painter.drawLine(c.x() - half, c.y() - half, c.x() + half, c.y() + half);
+        painter.drawLine(c.x() + half, c.y() - half, c.x() - half, c.y() + half);
+    }
+}
+
+void TitleBar::patchButton(Button button)
+{
+    if (button == None || m_canvas.size() != size())
+        return;
+    const QRect rc = buttonRect(button);
+    QPainter painter(&m_canvas);
+    paintButton(painter, button);
+    update(rc);
+}
+
+void TitleBar::updateCornerMask()
+{
+    const bool maximized = hostWindow() && hostWindow()->isMaximized();
+    m_chromeMaximized = maximized;
+    if (maximized || width() < 2 || height() < 2) {
+        clearMask();
+        return;
+    }
+    const int radius = 8;
+    const int diameter = radius * 2;
+    QRegion region(rect());
+    region -= QRect(0, 0, radius, radius);
+    region -= QRect(width() - radius, 0, radius, radius);
+    region += QRegion(0, 0, diameter, diameter, QRegion::Ellipse);
+    region += QRegion(width() - diameter, 0, diameter, diameter, QRegion::Ellipse);
+    setMask(region);
+}
+
+void TitleBar::setHostStaysOnTop(bool on)
+{
+    const bool has = windowFlags().testFlag(Qt::WindowStaysOnTopHint);
+    if (has == on)
+        return;
+    Qt::WindowFlags flags = Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint
+        | Qt::WindowDoesNotAcceptFocus;
+    if (on)
+        flags |= Qt::WindowStaysOnTopHint;
+    const bool wasVisible = isVisible();
+    setWindowFlags(flags);
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    updateCornerMask();
+    if (wasVisible)
+        show();
+}
+
+void TitleBar::setChromeMaximized(bool maximized)
+{
+    if (m_chromeMaximized == maximized)
+        return;
+    m_chromeMaximized = maximized;
+    updateCornerMask();
+    rebuildCanvas();
+}
+
+void TitleBar::paintEvent(QPaintEvent *event)
+{
+    if (m_canvas.size() != size())
+        rebuildCanvas();
+    if (m_canvas.isNull())
+        return;
+    QPainter painter(this);
+    const QRect rc = event->rect();
+    painter.drawPixmap(rc, m_canvas, rc);
+}
+
+void TitleBar::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateCornerMask();
+    rebuildCanvas();
+}
+
+bool TitleBar::nativeEvent(const QByteArray &eventType, void *message, long *result)
+{
+#ifdef Q_OS_WIN
+    if (eventType == "windows_generic_MSG") {
+        MSG *msg = static_cast<MSG *>(message);
+        if (msg->message == WM_NCHITTEST) {
+            const QPoint local = mapFromGlobal(QPoint(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)));
+            const int border = 6;
+            const bool onEdge = local.y() <= border || local.x() <= border || local.x() >= width() - border;
+            if (onEdge && hitTest(local) == None) {
+                *result = HTTRANSPARENT;
+                return true;
+            }
         }
     }
+#else
+    Q_UNUSED(eventType)
+    Q_UNUSED(message)
+    Q_UNUSED(result)
+#endif
+    return QWidget::nativeEvent(eventType, message, result);
 }
 
 void TitleBar::mousePressEvent(QMouseEvent *event)
@@ -426,11 +563,11 @@ void TitleBar::mousePressEvent(QMouseEvent *event)
 
     m_pressed = hitTest(event->pos());
     if (m_pressed != None) {
-        update();
+        patchButton(m_pressed);
         return;
     }
 
-    QWidget *win = window();
+    QWidget *win = hostWindow();
     if (!win)
         return;
 
@@ -453,8 +590,8 @@ void TitleBar::mousePressEvent(QMouseEvent *event)
 
 void TitleBar::mouseMoveEvent(QMouseEvent *event)
 {
-    if (m_dragging && window()) {
-        window()->move(event->globalPos() - m_dragOffset);
+    if (m_dragging && hostWindow()) {
+        hostWindow()->move(event->globalPos() - m_dragOffset);
         return;
     }
 
@@ -476,16 +613,17 @@ void TitleBar::mouseReleaseEvent(QMouseEvent *event)
     m_pressed = None;
     m_dragging = false;
     setHover(hitTest(event->pos()));
+    patchButton(released);
 
-    if (!inside || !window())
+    if (!inside || !hostWindow())
         return;
 
     if (released == Minimize) {
-        window()->showMinimized();
+        hostWindow()->showMinimized();
     } else if (released == Maximize) {
         toggleMaximize();
     } else if (released == Close) {
-        window()->close();
+        hostWindow()->close();
     } else if (released == Pin) {
         setStayOnTopEnabled(!m_stayOnTop);
     } else if (released == Ghost) {
@@ -497,7 +635,7 @@ void TitleBar::mouseReleaseEvent(QMouseEvent *event)
     } else if (released == ToggleAddress) {
         m_addressBarVisible = !m_addressBarVisible;
         updateTooltip(ToggleAddress);
-        update();
+        rebuildCanvas();
         emit addressBarVisibleChanged(m_addressBarVisible);
     }
 }
@@ -510,11 +648,8 @@ void TitleBar::mouseDoubleClickEvent(QMouseEvent *event)
 
 void TitleBar::leaveEvent(QEvent *)
 {
-    if (!m_dragging) {
-        m_hover = None;
-        setToolTip(QString());
-        update();
-    }
+    if (!m_dragging)
+        setHover(None);
 }
 
 void TitleBar::wheelEvent(QWheelEvent *event)
@@ -536,7 +671,7 @@ void TitleBar::setStayOnTopEnabled(bool on)
     m_stayOnTop = on;
     QSettings settings;
     settings.setValue(QStringLiteral("window/stayOnTop"), m_stayOnTop);
-    update();
+    rebuildCanvas();
     emit stayOnTopChanged(m_stayOnTop);
 }
 
@@ -551,7 +686,7 @@ void TitleBar::setDisplayOpacity(int percent)
     if (m_opacityLabel)
         m_opacityLabel->setText(QString::number(clamped));
     updateTooltip(m_hover);
-    update();
+    rebuildCanvas();
     emit displayOpacityChanged(m_displayOpacity);
     QSettings settings;
     settings.setValue(QStringLiteral("display/opacity"), m_displayOpacity);
@@ -775,7 +910,7 @@ void TitleBar::setTitleHoverEnabled(bool on)
     QSettings settings;
     settings.setValue(QStringLiteral("ghost/titleHover"), m_titleHover);
     updateTooltip(m_hover);
-    update();
+    rebuildCanvas();
     emit titleHoverChanged(m_titleHover);
 }
 
@@ -783,7 +918,7 @@ void TitleBar::emitGhostSettings()
 {
     emit ghostSettingsChanged(m_ghostOption != 0, m_ghostOption == 2, m_ghostModifiers, m_ghostVirtualKey);
     updateGhostTooltip();
-    update();
+    rebuildCanvas();
 }
 
 void TitleBar::updateGhostKeyLabel()
@@ -796,6 +931,6 @@ void TitleBar::updateGhostKeyLabel()
 
 void TitleBar::updateGhostTooltip()
 {
-    if (m_hover == Ghost)
-        updateTooltip(Ghost);
+    if (m_hover == Ghost || m_hover == TitleHover)
+        updateTooltip(m_hover);
 }
